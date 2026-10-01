@@ -1,0 +1,10 @@
+.tools/
+artifacts/
+logs/
+**/bin/
+**/obj/
+.vs/
+*.user
+*.suo
+*.tmp
+scratch/
