@@ -7,6 +7,8 @@ fn main() {
         resource.set_manifest_file("assets/app.manifest");
         resource.set("FileDescription", "QuickADB 安装抽屉");
         resource.set("ProductName", "QuickADB");
-        resource.compile().expect("Windows application resource compilation failed");
+        resource
+            .compile()
+            .expect("Windows application resource compilation failed");
     }
 }

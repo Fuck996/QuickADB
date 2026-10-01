@@ -16,7 +16,7 @@ registry = "sparse+https://rsproxy.cn/index/"
 }
 Push-Location $projectRoot
 try {
-    $arguments = @('build', '--target', 'x86_64-pc-windows-msvc')
+    $arguments = @('build', '--target', 'x86_64-pc-windows-msvc', '--locked')
     if ($Release) { $arguments += '--release' }
     & cargo @arguments
     if ($LASTEXITCODE -ne 0) { throw '原生构建失败。' }

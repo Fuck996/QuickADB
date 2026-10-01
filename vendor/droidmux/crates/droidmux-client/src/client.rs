@@ -392,13 +392,19 @@ impl AdbClient {
     }
 
     /// Opens AOSP's NUL-separated abb_exec argument vector.
-    pub async fn open_abb_exec_args(&self, arguments: &[&str]) -> Result<AdbStream, AdbClientError> {
+    pub async fn open_abb_exec_args(
+        &self,
+        arguments: &[&str],
+    ) -> Result<AdbStream, AdbClientError> {
         if arguments.is_empty()
-            || arguments.iter().any(|argument| argument.is_empty() || argument.as_bytes().contains(&0))
+            || arguments
+                .iter()
+                .any(|argument| argument.is_empty() || argument.as_bytes().contains(&0))
         {
             return Err(AdbClientError::InvalidServiceName);
         }
-        self.open_encoded_service(&format!("abb_exec:{}", arguments.join("\0"))).await
+        self.open_encoded_service(&format!("abb_exec:{}", arguments.join("\0")))
+            .await
     }
 
     async fn open_encoded_service(&self, service: &str) -> Result<AdbStream, AdbClientError> {

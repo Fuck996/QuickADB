@@ -23,7 +23,16 @@ pub struct Endpoint {
 
 impl Endpoint {
     pub fn key(&self) -> String {
-        format!("{}://{}:{}", if self.paired_id.is_some() { "tls" } else { "tcp" }, self.host, self.port)
+        format!(
+            "{}://{}:{}",
+            if self.paired_id.is_some() {
+                "tls"
+            } else {
+                "tcp"
+            },
+            self.host,
+            self.port
+        )
     }
 }
 
@@ -76,7 +85,10 @@ pub enum JobStage {
 
 impl JobStage {
     pub fn active(&self) -> bool {
-        matches!(self, Self::Queued | Self::Preparing | Self::Transferring | Self::Installing)
+        matches!(
+            self,
+            Self::Queued | Self::Preparing | Self::Transferring | Self::Installing
+        )
     }
 
     pub fn label(&self) -> &'static str {
