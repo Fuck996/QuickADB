@@ -66,6 +66,19 @@ impl Storage {
             .clone()
     }
 
+    pub fn paired_devices(&self) -> Vec<StoredPairedDevice> {
+        self.paired
+            .lock()
+            .expect("pairing lock poisoned")
+            .values()
+            .map(|d| StoredPairedDevice {
+                device_id: d.id.clone(),
+                host: d.host.clone(),
+                certificate_fingerprint: d.fingerprint.clone(),
+            })
+            .collect()
+    }
+
     pub fn update_settings(&self, change: impl FnOnce(&mut Settings)) -> Result<()> {
         let mut saved = self.settings.lock().expect("settings lock poisoned");
         let mut updated = saved.clone();

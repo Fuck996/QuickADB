@@ -755,6 +755,7 @@ impl Drawer {
                 {
                     *mode = value;
                     code.clear();
+                    port.clear();
                 }
             }
         });
@@ -786,7 +787,7 @@ impl Drawer {
                     ui.label(RichText::new("连接已授权的手机").strong());
                     ui.label(
                         RichText::new(
-                            "手机重新开启无线调试后，连接端口可能变化。请填写主页显示的当前端口。",
+                            "选择配对记录后自动发现当前地址与端口，手机需保持无线调试开启。",
                         )
                         .size(13.)
                         .color(secondary_text(ui)),
@@ -802,12 +803,7 @@ impl Drawer {
             });
         ui.add_space(8.);
         if *mode == 1 {
-            let saved = self.storage.settings();
-            let paired: Vec<_> = saved
-                .endpoints
-                .iter()
-                .filter(|e| e.paired_id.is_some())
-                .collect();
+            let paired = self.storage.paired_devices();
             if paired.is_empty() {
                 ui.label("还没有配对记录，请先完成无线配对。");
                 if ui.button("去无线配对").clicked() {
@@ -815,34 +811,50 @@ impl Drawer {
                 }
             } else {
                 ui.label(RichText::new("选择设备记录").strong());
-                let selected = paired
-                    .iter()
-                    .find(|e| e.paired_id.as_ref() == Some(paired_id));
+                let selected = paired.iter().find(|e| e.device_id == *paired_id);
+                let record_label = |id: &str, host: &str| {
+                    let name = snapshot
+                        .devices
+                        .iter()
+                        .find(|d| d.id == format!("tls:{id}"))
+                        .map(|d| d.name.as_str())
+                        .or_else(|| {
+                            snapshot
+                                .discovered
+                                .iter()
+                                .find(|d| d.paired_id() == Some(id))
+                                .map(|d| d.name.as_str())
+                        })
+                        .unwrap_or(id);
+                    format!("{name} · {host}")
+                };
                 let label = selected
-                    .map(|e| format!("{}:{}", e.host, e.port))
+                    .map(|e| record_label(&e.device_id, &e.host))
                     .unwrap_or_else(|| "请选择已配对的设备".into());
                 egui::ComboBox::from_id_salt("paired-device")
                     .width(ui.available_width())
                     .selected_text(label)
                     .show_ui(ui, |ui| {
-                        for endpoint in paired {
+                        for record in &paired {
                             if ui
                                 .selectable_label(
-                                    endpoint.paired_id.as_ref() == Some(paired_id),
-                                    format!("{}:{}", endpoint.host, endpoint.port),
+                                    record.device_id == *paired_id,
+                                    record_label(&record.device_id, &record.host),
                                 )
                                 .clicked()
                             {
-                                *host = endpoint.host.clone();
-                                *port = endpoint.port.to_string();
-                                *paired_id = endpoint.paired_id.clone().expect("paired endpoint");
+                                *host = record.host.clone();
+                                port.clear();
+                                *paired_id = record.device_id.clone();
                             }
                         }
                     });
                 ui.add_space(6.);
             }
         }
-        field(ui, "手机 IP 地址", host, false, "例如 192.168.1.8");
+        if *mode != 1 {
+            field(ui, "手机 IP 地址", host, false, "例如 192.168.1.8");
+        }
         if *mode == 0 {
             ui.columns(2, |columns| {
                 field(
@@ -855,30 +867,45 @@ impl Drawer {
                 field(&mut columns[1], "六位配对码", code, true, "输入 6 位数字");
             });
         }
-        field(
-            ui,
-            "连接端口",
-            port,
-            false,
-            if *mode == 2 {
-                "通常为 5555，以设备设置为准"
-            } else {
-                "无线调试主页中的端口"
-            },
-        );
-        if *mode == 0 {
+        if *mode == 2 {
+            field(ui, "连接端口", port, false, "通常为 5555，以设备设置为准");
+        } else {
             ui.label(
-                RichText::new("连接端口在“无线调试”主页查看，与配对端口不同。")
-                    .small()
-                    .color(secondary_text(ui)),
+                RichText::new(if port.trim().is_empty() {
+                    "连接端口自动发现，无需填写。"
+                } else {
+                    "已指定手动端口，清空后恢复自动发现。"
+                })
+                .size(13.)
+                .color(secondary_text(ui)),
             );
+            egui::CollapsingHeader::new("手动填写连接端口（可选）")
+                .id_salt("manual-wireless-port")
+                .show(ui, |ui| {
+                    if *mode == 1 {
+                        field(ui, "手机 IP 地址", host, false, "无线调试主页中的 IP 地址");
+                    }
+                    field(ui, "连接端口", port, false, "留空自动发现");
+                    ui.label(
+                        RichText::new(
+                            "仅在自动发现不可用时填写无线调试主页的端口，与配对端口不同。",
+                        )
+                        .size(13.)
+                        .color(secondary_text(ui)),
+                    );
+                });
         }
         let discovered: Vec<_> = snapshot
             .discovered
             .iter()
             .filter(|device| match *mode {
-                0 => device.service_type != AdbServiceType::Legacy,
-                1 => device.service_type == AdbServiceType::TlsConnect,
+                0 => device.service_type == AdbServiceType::Pairing,
+                1 => device.paired_id().is_some_and(|id| {
+                    self.storage
+                        .paired_devices()
+                        .iter()
+                        .any(|d| d.device_id == id)
+                }),
                 _ => device.service_type == AdbServiceType::Legacy,
             })
             .collect();
@@ -893,7 +920,7 @@ impl Drawer {
                         let name = known_name.unwrap_or(&device.name);
                         let kind = match device.service_type {
                             AdbServiceType::Pairing => "配对服务 · 填入配对端口",
-                            AdbServiceType::TlsConnect => "无线连接 · 填入连接端口",
+                            AdbServiceType::TlsConnect => "无线连接 · 自动获取端口",
                             AdbServiceType::Legacy => "传统 TCP · 填入连接端口",
                         };
                         let response = egui::Frame::new()
@@ -920,6 +947,9 @@ impl Drawer {
                             *host = endpoint.host.clone();
                             if device.service_type == AdbServiceType::Pairing {
                                 *pairing_port = endpoint.port.to_string();
+                            } else if let Some(id) = device.paired_id() {
+                                *paired_id = id.into();
+                                port.clear();
                             } else {
                                 *port = endpoint.port.to_string();
                             }
@@ -929,8 +959,12 @@ impl Drawer {
             });
         }
         ui.add_space(10.);
+        if !port.trim().is_empty() && !port.trim().parse::<u16>().is_ok_and(|p| p > 0) {
+            ui.colored_label(ui.visuals().error_fg_color, "连接端口需为 1–65535 的整数。");
+        }
         let valid = !host.trim().is_empty()
-            && port.parse::<u16>().is_ok_and(|p| p > 0)
+            && ((*mode != 2 && port.trim().is_empty())
+                || port.trim().parse::<u16>().is_ok_and(|p| p > 0))
             && (*mode != 0
                 || (pairing_port.parse::<u16>().is_ok_and(|p| p > 0)
                     && code.len() == 6
@@ -954,7 +988,11 @@ impl Drawer {
             .inner
             .clicked()
         {
-            let connection_port = port.parse().expect("validated port");
+            let connection_port = if port.trim().is_empty() {
+                None
+            } else {
+                Some(port.trim().parse().expect("validated port"))
+            };
             if *mode == 0 {
                 self.backend.pair(
                     host.trim().into(),
@@ -962,10 +1000,12 @@ impl Drawer {
                     code.clone(),
                     connection_port,
                 );
+            } else if *mode == 1 && connection_port.is_none() {
+                self.backend.connect_paired(paired_id.clone());
             } else {
                 self.backend.connect(Endpoint {
                     host: host.trim().into(),
-                    port: connection_port,
+                    port: connection_port.expect("validated manual port"),
                     paired_id: if *mode == 1 {
                         Some(paired_id.clone())
                     } else {

@@ -23,16 +23,10 @@ pub struct Endpoint {
 
 impl Endpoint {
     pub fn key(&self) -> String {
-        format!(
-            "{}://{}:{}",
-            if self.paired_id.is_some() {
-                "tls"
-            } else {
-                "tcp"
-            },
-            self.host,
-            self.port
-        )
+        match &self.paired_id {
+            Some(id) => format!("tls:{id}"),
+            None => format!("tcp://{}:{}", self.host, self.port),
+        }
     }
 }
 
@@ -133,8 +127,16 @@ pub struct Snapshot {
 #[derive(Clone, Debug)]
 pub struct DiscoveredDevice {
     pub fullname: String,
+    pub instance_name: String,
     pub name: String,
     pub model_advertised: bool,
     pub service_type: droidmux::discovery::AdbServiceType,
     pub endpoint: Endpoint,
+}
+
+impl DiscoveredDevice {
+    pub fn paired_id(&self) -> Option<&str> {
+        (self.service_type == droidmux::discovery::AdbServiceType::TlsConnect)
+            .then_some(self.instance_name.as_str())
+    }
 }

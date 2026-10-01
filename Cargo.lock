@@ -3373,7 +3373,7 @@ dependencies = [
 
 [[package]]
 name = "quickadb"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3381,7 +3381,10 @@ dependencies = [
  "droidmux",
  "eframe",
  "image",
+ "mdns-sd",
+ "rcgen",
  "rfd",
+ "rustls",
  "secrecy",
  "serde",
  "serde_json",

@@ -906,6 +906,19 @@ impl AdbClient {
         }
     }
 
+    /// Waits for the session to close and returns its transport or local closure reason.
+    pub async fn wait_closed(&self) -> String {
+        let mut status = self.session.status.clone();
+        loop {
+            if let Some(reason) = status.borrow().closure_reason() {
+                return reason;
+            }
+            if status.changed().await.is_err() {
+                return "session task stopped".to_owned();
+            }
+        }
+    }
+
     /// Returns the negotiated ADB protocol version.
     #[must_use]
     pub const fn protocol_version(&self) -> u32 {

@@ -90,7 +90,9 @@ impl Backend {
             }
         });
         for endpoint in engine.storage.settings().endpoints {
-            runtime.spawn(engine.clone().connect_endpoint(endpoint));
+            if endpoint.paired_id.is_none() {
+                runtime.spawn(engine.clone().connect_endpoint(endpoint));
+            }
         }
         Ok(Self {
             runtime: Some(runtime),
@@ -146,7 +148,13 @@ impl Backend {
         self.spawn(self.engine.clone().connect_endpoint(endpoint));
     }
 
-    pub fn pair(&self, host: String, pairing_port: u16, code: String, connection_port: u16) {
+    pub fn pair(
+        &self,
+        host: String,
+        pairing_port: u16,
+        code: String,
+        connection_port: Option<u16>,
+    ) {
         let engine = self.engine.clone();
         self.spawn(async move {
             engine.state.lock().expect("state lock poisoned").pairing = true;
@@ -163,18 +171,27 @@ impl Backend {
             engine.state.lock().expect("state lock poisoned").pairing = false;
             match result {
                 Ok(result) => {
-                    engine.notice("配对成功，正在连接无线调试端口");
-                    engine
-                        .connect_endpoint(Endpoint {
-                            host,
-                            port: connection_port,
-                            paired_id: Some(result.device_id),
-                        })
-                        .await;
+                    engine.notice("配对成功，正在查找设备的无线连接服务");
+                    match connection_port {
+                        Some(port) => {
+                            engine
+                                .connect_endpoint(Endpoint {
+                                    host,
+                                    port,
+                                    paired_id: Some(result.device_id),
+                                })
+                                .await
+                        }
+                        None => engine.connect_paired(result.device_id).await,
+                    }
                 }
                 Err(error) => engine.notice(&format!("无线配对失败：{error}")),
             }
         });
+    }
+
+    pub fn connect_paired(&self, device_id: String) {
+        self.spawn(self.engine.clone().connect_paired(device_id));
     }
 
     pub fn retry_connection(&self, id: String) {
@@ -185,7 +202,10 @@ impl Backend {
             .find(|d| d.id == id)
             .and_then(|d| d.endpoint.clone());
         if let Some(endpoint) = endpoint {
-            self.connect(endpoint);
+            match &endpoint.paired_id {
+                Some(device_id) => self.connect_paired(device_id.clone()),
+                None => self.connect(endpoint),
+            }
         } else {
             let info = self
                 .engine
@@ -438,6 +458,7 @@ impl Engine {
         if let Some(device) = state.devices.iter_mut().find(|d| d.id == id) {
             device.status = DeviceStatus::Connecting;
             device.detail.clear();
+            device.endpoint = endpoint;
         } else {
             state.devices.push(Device {
                 id: id.into(),
@@ -495,6 +516,45 @@ impl Engine {
         }
         .await;
         self.finish_connect(id, result).await;
+    }
+
+    async fn connect_paired(self: Arc<Self>, device_id: String) {
+        if !self
+            .storage
+            .paired_devices()
+            .iter()
+            .any(|d| d.device_id == device_id)
+        {
+            self.notice("此无线设备尚未与 QuickADB 配对");
+            return;
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        self.notice("正在自动查找设备的无线连接端口…");
+        loop {
+            let endpoint = self
+                .state
+                .lock()
+                .expect("state lock poisoned")
+                .discovered
+                .iter()
+                .find(|d| d.paired_id() == Some(device_id.as_str()))
+                .map(|d| Endpoint {
+                    paired_id: Some(device_id.clone()),
+                    ..d.endpoint.clone()
+                });
+            if let Some(endpoint) = endpoint {
+                self.connect_endpoint(endpoint).await;
+                return;
+            }
+            tokio::select! {
+                _ = self.stop.cancelled() => return,
+                _ = tokio::time::sleep_until(deadline) => {
+                    self.notice("配对记录已保存，但尚未发现设备的连接服务。请确认手机已开启无线调试、电脑与手机在同一局域网；也可在“已配对设备”中展开手动填写连接端口。");
+                    return;
+                }
+                _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+            }
+        }
     }
 
     async fn connect_endpoint(self: Arc<Self>, endpoint: Endpoint) {
@@ -569,9 +629,8 @@ impl Engine {
             .await
             .context("等待无线设备授权超时")??;
             self.storage.update_settings(|settings| {
-                if !settings.endpoints.iter().any(|e| e.key() == endpoint.key()) {
-                    settings.endpoints.push(endpoint.clone());
-                }
+                settings.endpoints.retain(|e| e.key() != id);
+                settings.endpoints.push(endpoint.clone());
             })?;
             Ok::<_, anyhow::Error>(client)
         }
@@ -630,28 +689,47 @@ impl Engine {
 
     async fn watch_connection(self: Arc<Self>, id: String, client: Arc<AdbClient>) {
         loop {
-            tokio::select! { _ = self.stop.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(10)) => {} }
-            let current = self
-                .clients
-                .lock()
-                .await
-                .get(&id)
-                .is_some_and(|c| Arc::ptr_eq(c, &client));
-            if !current {
-                break;
+            let reason = tokio::select! {
+                _ = self.stop.cancelled() => return,
+                reason = client.wait_closed() => Some(reason),
+                _ = tokio::time::sleep(Duration::from_secs(10)) => None,
+            };
+            let result = if reason.is_none() {
+                tokio::select! {
+                    _ = self.stop.cancelled() => return,
+                    result = shell_text(&client, "echo quickadb") => Some(result),
+                }
+            } else {
+                None
+            };
+            let mut clients = self.clients.lock().await;
+            if !clients.get(&id).is_some_and(|c| Arc::ptr_eq(c, &client)) {
+                return;
             }
-            let result = shell_text(&client, "echo quickadb").await;
-            if let Err(error) = result {
-                self.clients.lock().await.remove(&id);
+            if reason.is_some() || client.state() == ConnectionState::Closed {
+                let reason = match reason {
+                    Some(reason) => reason,
+                    None => client.wait_closed().await,
+                };
+                clients.remove(&id);
                 self.update_device(&id, |d| {
                     d.status = DeviceStatus::Offline;
                     d.selected = false;
-                    d.detail = format!("连接中断：{error:#}");
+                    d.detail = format!("连接中断：{reason}");
                 });
-                if let Err(error) = client.close().await {
-                    self.notice(&format!("关闭中断连接：{error}"));
+                drop(clients);
+                self.notice(&format!("设备 {id} 连接中断：{reason}"));
+                return;
+            }
+            match result {
+                Some(Err(error)) => {
+                    let detail = format!("状态检查失败，ADB 会话仍已连接：{error:#}");
+                    self.update_device(&id, |d| d.detail.clone_from(&detail));
+                    drop(clients);
+                    self.notice(&format!("设备 {id} {detail}"));
                 }
-                break;
+                Some(Ok(_)) => self.update_device(&id, |d| d.detail.clear()),
+                None => {}
             }
         }
     }
@@ -730,18 +808,51 @@ impl Engine {
                             name: device
                                 .model
                                 .unwrap_or_else(|| format!("服务：{}", device.instance_name)),
+                            instance_name: device.instance_name,
                             service_type: device.service_type,
                             endpoint,
                         };
-                        let mut state = self.state.lock().expect("state lock poisoned");
-                        if let Some(existing) = state
-                            .discovered
-                            .iter_mut()
-                            .find(|entry| entry.fullname == discovered.fullname)
+                        let paired_id = discovered.paired_id().map(str::to_owned);
+                        let connect = {
+                            let mut state = self.state.lock().expect("state lock poisoned");
+                            let changed = if let Some(existing) = state
+                                .discovered
+                                .iter_mut()
+                                .find(|entry| entry.fullname == discovered.fullname)
+                            {
+                                let changed = existing.endpoint != discovered.endpoint;
+                                *existing = discovered.clone();
+                                changed
+                            } else {
+                                state.discovered.push(discovered.clone());
+                                true
+                            };
+                            changed
+                                && paired_id.as_ref().is_some_and(|id| {
+                                    !state.devices.iter().any(|d| {
+                                        d.id == format!("tls:{id}")
+                                            && matches!(
+                                                d.status,
+                                                DeviceStatus::Online
+                                                    | DeviceStatus::Connecting
+                                                    | DeviceStatus::Unauthorized
+                                                    | DeviceStatus::Disconnected
+                                            )
+                                    })
+                                })
+                        };
+                        if connect
+                            && let Some(id) = paired_id
+                            && self
+                                .storage
+                                .paired_devices()
+                                .iter()
+                                .any(|d| d.device_id == id)
                         {
-                            *existing = discovered;
-                        } else {
-                            state.discovered.push(discovered);
+                            tokio::spawn(self.clone().connect_endpoint(Endpoint {
+                                paired_id: Some(id),
+                                ..discovered.endpoint
+                            }));
                         }
                     }
                 }

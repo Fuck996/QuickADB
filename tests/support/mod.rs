@@ -9,23 +9,30 @@ use quickadb::apk::Apk;
 use std::{
     collections::BTreeMap,
     io::{Read, Write},
-    net::{TcpListener, TcpStream},
+    net::TcpListener,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
     time::{Duration, SystemTime},
 };
 
 pub struct TempDirectory(pub PathBuf);
+static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 impl TempDirectory {
     pub fn new() -> Self {
         let unique = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let directory =
-            std::env::temp_dir().join(format!("quickadb-tests-{}-{unique}", std::process::id()));
-        std::fs::create_dir_all(&directory).expect("create fixture directory");
+        let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "quickadb-tests-{}-{unique}-{sequence}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).expect("create fixture directory");
         Self(directory)
     }
     pub fn apk(&self, name: &str, length: usize) -> Apk {
@@ -56,6 +63,9 @@ pub struct DeviceOptions {
     pub delay_ack: Duration,
     pub disconnect_after_upload: bool,
     pub serial: &'static str,
+    pub reject_heartbeat: bool,
+    pub idle_timeout: Duration,
+    pub tls: bool,
 }
 impl Default for DeviceOptions {
     fn default() -> Self {
@@ -65,6 +75,9 @@ impl Default for DeviceOptions {
             delay_ack: Duration::ZERO,
             disconnect_after_upload: false,
             serial: "QUICKADB-TEST",
+            reject_heartbeat: false,
+            idle_timeout: Duration::from_secs(5),
+            tls: false,
         }
     }
 }
@@ -92,18 +105,65 @@ struct StreamState {
 
 impl DeviceServer {
     pub fn start(options: DeviceOptions) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback bind");
+        let listener = TcpListener::bind(if options.tls {
+            "0.0.0.0:0"
+        } else {
+            "127.0.0.1:0"
+        })
+        .expect("fixture bind");
         let port = listener.local_addr().expect("address").port();
         let records = Arc::new(Mutex::new(Records::default()));
         let copy = records.clone();
         let worker = thread::spawn(move || {
-            let (mut socket, _) = listener.accept().expect("accept fixture connection");
+            listener.set_nonblocking(true).expect("accept timeout");
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= deadline {
+                            return;
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept fixture connection: {error}"),
+                }
+            };
             socket
-                .set_read_timeout(Some(Duration::from_secs(5)))
+                .set_nonblocking(false)
+                .expect("blocking fixture socket");
+            socket
+                .set_read_timeout(Some(options.idle_timeout))
                 .expect("socket timeout");
             socket.set_nodelay(true).expect("socket no delay");
             let handshake = read_packet(&mut socket).expect("handshake");
             assert_eq!(handshake.command, AdbCommand::Connect);
+            let mut socket: Box<dyn FixtureSocket> = if options.tls {
+                send(&mut socket, AdbCommand::StartTls, 0x0100_0000, 0, &[]);
+                assert_eq!(
+                    read_packet(&mut socket).expect("STLS response").command,
+                    AdbCommand::StartTls
+                );
+                let rcgen::CertifiedKey { cert, key_pair } =
+                    rcgen::generate_simple_self_signed(vec!["localhost".into()])
+                        .expect("TLS fixture identity");
+                let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+                    rustls::crypto::ring::default_provider(),
+                ))
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .expect("TLS 1.3")
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![cert.der().clone()],
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(key_pair.serialize_der()).into(),
+                )
+                .expect("TLS config");
+                let connection =
+                    rustls::ServerConnection::new(Arc::new(config)).expect("TLS server");
+                Box::new(rustls::StreamOwned::new(connection, socket))
+            } else {
+                Box::new(socket)
+            };
             let banner = format!(
                 "device::features={};product=protocol-test\0",
                 options.features
@@ -126,6 +186,11 @@ impl DeviceServer {
                             .services
                             .push(packet.payload.to_vec());
                         let text = String::from_utf8_lossy(&packet.payload);
+                        if options.reject_heartbeat && packet.payload.ends_with(b"echo quickadb\0")
+                        {
+                            send(&mut socket, AdbCommand::Close, 0, local, &[]);
+                            continue;
+                        }
                         send(&mut socket, AdbCommand::Okay, remote, local, &[]);
                         let parts: Vec<_> =
                             text.trim_end_matches('\0').split(['\0', ' ']).collect();
@@ -136,7 +201,7 @@ impl DeviceServer {
                             sync: text.starts_with("sync:"),
                             sync_buffer: Vec::new(),
                         };
-                        if text.starts_with("shell:") {
+                        if text.starts_with("shell:") || text.starts_with("shell,v2,raw:") {
                             let reply = if text.contains("getprop") {
                                 format!("Protocol Test Device\n{}\n14\n", options.serial)
                             } else if text.starts_with("shell:pm install ") {
@@ -146,14 +211,17 @@ impl DeviceServer {
                             } else {
                                 "quickadb\n".into()
                             };
+                            let reply = if text.starts_with("shell,v2,raw:") {
+                                let mut frames = vec![1];
+                                frames.extend_from_slice(&(reply.len() as u32).to_le_bytes());
+                                frames.extend_from_slice(reply.as_bytes());
+                                frames.extend_from_slice(&[3, 1, 0, 0, 0, 0]);
+                                frames
+                            } else {
+                                reply.into_bytes()
+                            };
                             if !reply.is_empty() {
-                                send(
-                                    &mut socket,
-                                    AdbCommand::Write,
-                                    remote,
-                                    local,
-                                    reply.as_bytes(),
-                                );
+                                send(&mut socket, AdbCommand::Write, remote, local, &reply);
                                 state.pending_close = true;
                             } else {
                                 send(&mut socket, AdbCommand::Close, remote, local, &[]);
@@ -301,7 +369,10 @@ impl Drop for DeviceServer {
     }
 }
 
-fn read_packet(socket: &mut TcpStream) -> std::io::Result<AdbPacket> {
+trait FixtureSocket: Read + Write {}
+impl<T: Read + Write> FixtureSocket for T {}
+
+fn read_packet(socket: &mut impl Read) -> std::io::Result<AdbPacket> {
     let mut header = [0u8; 24];
     socket.read_exact(&mut header)?;
     let parsed = AdbHeader::decode(&header).map_err(std::io::Error::other)?;
@@ -313,7 +384,7 @@ fn read_packet(socket: &mut TcpStream) -> std::io::Result<AdbPacket> {
         .map_err(std::io::Error::other)
 }
 
-fn send(socket: &mut TcpStream, command: AdbCommand, arg0: u32, arg1: u32, bytes: &[u8]) {
+fn send(socket: &mut impl Write, command: AdbCommand, arg0: u32, arg1: u32, bytes: &[u8]) {
     let packet =
         AdbPacket::new(command, arg0, arg1, Bytes::copy_from_slice(bytes)).expect("fixture packet");
     socket
