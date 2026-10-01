@@ -98,3 +98,14 @@
 - 发布文件 `QuickADB-0.9.1-x64.exe` 为 15,425,536 字节，文件版本与产品版本均为 0.9.1，导入表仅含 21 个 Windows 系统依赖，签名状态仍为 `NotSigned`。项目 artifacts 与 `U:\开发工作` 副本 SHA-256 均为 `3BE06C30CD7636949CEF5FAA78A70935BA31DEEC46A000FCF603B6D19FA21FF8`。
 
 官方依据：[AOSP ADB Wi-Fi 架构](https://android.googlesource.com/platform/packages/modules/adb/+/HEAD/docs/dev/adb_wifi.md)：配对服务仅在配对服务器活动时广播，连接服务在 TLS 调试服务器活动时广播，连接广播可先于配对存在；只有已知配对 GUID 才用于自动连接。
+
+## 0.9.2 图钉系统置顶
+
+- 对照用户指定的 CodexInfo，确认其固定行为调用原生 `set_always_on_top`，启动也恢复该状态。QuickADB 原图钉只修改 `pinned` 并阻止失焦收起，窗口层级却只读取独立的 `topmost`。实际 0.9.1 EXE 在 `pinned=true, topmost=false` 时没有 `WS_EX_TOPMOST`；普通测试窗口获得焦点后覆盖抽屉，抽屉仍可见，复现了用户看到的消失现象。
+- 修正使用同一窗口层级规则：固定或独立置顶启用时设置 `AlwaysOnTop`，否则恢复 `Normal`。启动、图钉、设置页及托盘重新展开都接入该规则。固定时独立置顶项显示勾选并禁用；取消固定后保留用户原有的独立置顶偏好，没有通过反复抢焦点模拟置顶。
+- 最终 0.9.2 Release 在隔离数据目录中验证。固定状态下，普通测试窗口确实获得前台焦点，抽屉 `Visible=true, WS_EX_TOPMOST=true`，原生窗口顺序确认抽屉在测试窗口上方。通过图钉取消固定后 `WS_EX_TOPMOST=false`，其他窗口获得焦点时抽屉隐藏；再次固定恢复置顶。关闭后仍常驻托盘，重新展开仍具有系统置顶标志。
+- 设置页通过实际 UIAutomation 开关验收，等待应用处理 UI 帧后，取消固定时持久化 `pinned=false, topmost=false` 且系统置顶标志为假；重新固定后标志为真。固定时“窗口保持置顶”控件状态为勾选、禁用。两个验收实例均从正式托盘菜单正常退出，退出码为 0，APK 上传数为零。
+- 原生应用 Clippy 严格检查、格式检查、diff 检查及最终 Release 构建通过，EXE 文件版本与产品版本均为 0.9.2。后台连接、安装及依赖未改动，沿用 0.1.3 的 15 项应用测试记录；既有原生文件输入和真机验收缺口保持不变。
+- SmartScreen 对比确认：旧 QuickADB、0.9.1 和 CodexInfo 均未签名；本地及 U 目录的 QuickADB 副本均无 `Zone.Identifier`。未签名不能单独解释这些应用的提示差异。截图中实际被阻止文件的启动来源尚未确认，因此本次没有宣称 SmartScreen 已解决，也没有修改安全策略、移除来源标记或添加必须签名的发布要求。
+
+官方依据：[egui 窗口层级命令](https://docs.rs/egui/0.36.2/egui/viewport/enum.ViewportCommand.html)、[Windows 原生置顶窗口](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos)、[SmartScreen 文件与发布者信誉](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation)。

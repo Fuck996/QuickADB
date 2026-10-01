@@ -38,12 +38,10 @@ pub fn run(storage: Arc<Storage>, backend: Backend) -> eframe::Result {
         .with_resizable(false)
         .with_drag_and_drop(true)
         .with_taskbar(false)
+        .with_window_level(window_level(&settings))
         .with_visible(!start_in_tray)
         .with_active(!start_in_tray)
         .with_icon(Arc::new(data));
-    if settings.topmost {
-        viewport = viewport.with_window_level(WindowLevel::AlwaysOnTop);
-    }
     let area = platform::monitor_work_area();
     let position = settings.window_position.unwrap_or([
         area.right as f32 - WIDTH - 24.,
@@ -293,6 +291,9 @@ impl Drawer {
         self.opened = Instant::now();
         self.was_focused = false;
         ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(window_level(
+            &self.preferences,
+        )));
         ctx.send_viewport_cmd(ViewportCommand::Focus);
     }
 
@@ -361,6 +362,10 @@ impl Drawer {
                 }
                 if pin_button(ui, self.preferences.pinned).clicked() {
                     self.preferences.pinned = !self.preferences.pinned;
+                    ui.ctx()
+                        .send_viewport_cmd(ViewportCommand::WindowLevel(window_level(
+                            &self.preferences,
+                        )));
                     self.persist();
                 }
             });
@@ -1239,9 +1244,15 @@ impl Drawer {
                         if let Err(error) = platform::set_startup(self.preferences.startup) { self.preferences.startup = before; self.backend.notify(&format!("开机启动设置失败：{error:#}")); }
                         else { self.persist(); }
                     }
-                    if ui.checkbox(&mut self.preferences.pinned, "固定抽屉，点击外部时不收起").changed() { self.persist(); }
-                    if ui.checkbox(&mut self.preferences.topmost, "窗口保持置顶").changed() {
-                        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(if self.preferences.topmost { WindowLevel::AlwaysOnTop } else { WindowLevel::Normal })); self.persist();
+                    if ui.checkbox(&mut self.preferences.pinned, "固定抽屉，置顶且点击外部时不收起").changed() {
+                        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(window_level(&self.preferences))); self.persist();
+                    }
+                    let mut topmost = self.preferences.pinned || self.preferences.topmost;
+                    if ui.add_enabled(!self.preferences.pinned, egui::Checkbox::new(&mut topmost, "窗口保持置顶"))
+                        .on_hover_text("固定抽屉时自动保持置顶；取消固定后可单独设置置顶。")
+                        .changed() {
+                        self.preferences.topmost = topmost;
+                        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(window_level(&self.preferences))); self.persist();
                     }
                     ui.add_space(6.);
                     ui.label(RichText::new("外观与安装").strong());
@@ -1555,6 +1566,13 @@ fn primary_button(text: &str) -> egui::Button<'_> {
         .fill(PRIMARY_GREEN)
         .min_size(Vec2::new(128., 40.))
 }
+fn window_level(settings: &Settings) -> WindowLevel {
+    if settings.pinned || settings.topmost {
+        WindowLevel::AlwaysOnTop
+    } else {
+        WindowLevel::Normal
+    }
+}
 fn pin_button(ui: &mut egui::Ui, pinned: bool) -> egui::Response {
     let label = if pinned {
         "取消固定"
@@ -1595,7 +1613,7 @@ fn pin_button(ui: &mut egui::Ui, pinned: bool) -> egui::Response {
     response.on_hover_text(if pinned {
         "取消固定，点击外部时自动收起"
     } else {
-        "固定抽屉，点击外部时保持展开"
+        "固定并置顶，点击外部时保持展开"
     })
 }
 fn modal_heading(ui: &mut egui::Ui, title: &str, close: &mut bool) {
