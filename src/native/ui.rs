@@ -2,7 +2,7 @@ use droidmux::discovery::AdbServiceType;
 use eframe::egui::{self, Color32, FontId, RichText, Stroke, Vec2, ViewportCommand, WindowLevel};
 use quickadb::{
     engine::Backend,
-    model::{Device, DeviceStatus, Endpoint, Job, JobStage, Settings, Snapshot},
+    model::{Device, DeviceStatus, Endpoint, Job, JobStage, PreparationState, Settings, Snapshot},
     platform,
     storage::Storage,
 };
@@ -36,6 +36,7 @@ pub fn run(storage: Arc<Storage>, backend: Backend) -> eframe::Result {
         .with_inner_size([WIDTH, HEIGHT])
         .with_decorations(false)
         .with_resizable(false)
+        .with_drag_and_drop(true)
         .with_taskbar(false)
         .with_visible(!start_in_tray)
         .with_active(!start_in_tray)
@@ -123,6 +124,7 @@ struct Drawer {
     collapsed: bool,
     exiting: bool,
     was_focused: bool,
+    drag_hovering: bool,
     opened: Instant,
     last_position: Option<[f32; 2]>,
     position_changed: Instant,
@@ -181,6 +183,7 @@ impl Drawer {
             collapsed: false,
             exiting: false,
             was_focused: false,
+            drag_hovering: false,
             opened: Instant::now(),
             last_position: None,
             position_changed: Instant::now(),
@@ -322,8 +325,7 @@ impl Drawer {
             .add_filter("Android 安装包", &["apk"])
             .pick_files()
         {
-            self.backend
-                .submit(paths, split, self.preferences.test_packages);
+            self.backend.prepare(paths, split);
         }
     }
 
@@ -529,7 +531,7 @@ impl Drawer {
     }
 
     fn drop_zone(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) {
-        let hovering = ui.input(|i| !i.raw.hovered_files.is_empty());
+        let hovering = self.drag_hovering;
         let selected = snapshot
             .devices
             .iter()
@@ -548,51 +550,149 @@ impl Drawer {
             })
             .stroke(Stroke::new(1.3, border))
             .corner_radius(12)
-            .inner_margin(20)
+            .inner_margin(16)
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.vertical_centered(|ui| {
-                    let (rect, _) =
-                        ui.allocate_exact_size(Vec2::new(38., 40.), egui::Sense::hover());
-                    let paper = rect.shrink(5.);
-                    ui.painter().rect(
-                        paper,
-                        4.,
-                        GREEN.gamma_multiply(0.09),
-                        Stroke::new(1.5, GREEN),
-                        egui::StrokeKind::Inside,
-                    );
-                    ui.painter().text(
-                        paper.center(),
-                        egui::Align2::CENTER_CENTER,
-                        "APK",
-                        FontId::proportional(10.),
-                        GREEN,
-                    );
-                    ui.label(
-                        RichText::new(if hovering {
-                            "松开即可加入安装队列"
-                        } else {
-                            "把 APK 拖到这里"
-                        })
-                        .size(18.)
-                        .strong(),
-                    );
-                    ui.label(
-                        RichText::new(if selected > 0 {
-                            format!("将安装到已选的 {selected} 台设备 · 支持批量拖入")
-                        } else {
-                            "先点击选择设备 · 可单选或多选".into()
-                        })
-                        .small()
-                        .color(secondary_text(ui)),
-                    );
-                });
+                if let Some(preparation) = &snapshot.preparation {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!("待安装 · {} 个 APK", preparation.paths.len()))
+                                .strong(),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add(egui::Button::new("清空").frame(false)).clicked() {
+                                self.backend.clear_preparation();
+                            }
+                        });
+                    });
+                    ui.add_space(4.);
+                    egui::ScrollArea::vertical()
+                        .id_salt("prepared-apks")
+                        .max_height(88.)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            for (index, path) in preparation.paths.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    let width = (ui.available_width() - 38.).max(1.);
+                                    ui.add_sized(
+                                        [width, 24.],
+                                        egui::Label::new(
+                                            RichText::new(
+                                                path.file_name()
+                                                    .unwrap_or(path.as_os_str())
+                                                    .to_string_lossy(),
+                                            )
+                                            .size(14.),
+                                        )
+                                        .truncate(),
+                                    )
+                                    .on_hover_text(path.display().to_string());
+                                    if ui
+                                        .add_sized([28., 24.], egui::Button::new("×").frame(false))
+                                        .on_hover_text("移除此 APK")
+                                        .clicked()
+                                    {
+                                        let mut paths = preparation.paths.clone();
+                                        paths.remove(index);
+                                        self.backend.prepare(paths, preparation.split);
+                                    }
+                                });
+                            }
+                            if let PreparationState::Failed(error) = &preparation.state {
+                                ui.label(
+                                    RichText::new(format!("准备失败：{error}"))
+                                        .small()
+                                        .color(ui.visuals().error_fg_color),
+                                );
+                            }
+                        });
+                    ui.add_space(4.);
+                    match &preparation.state {
+                        PreparationState::Checking => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label("正在检查安装包…");
+                            });
+                        }
+                        PreparationState::Ready(apks) => {
+                            let total: u64 = apks.iter().map(|a| a.size).sum();
+                            ui.label(
+                                RichText::new(format!(
+                                    "已准备 · {} · 点击安装后开始",
+                                    bytes(total as f64)
+                                ))
+                                .small()
+                                .color(secondary_text(ui)),
+                            );
+                        }
+                        PreparationState::Failed(_) => {}
+                    }
+                    if preparation.paths.len() > 1 {
+                        let mut split = preparation.split;
+                        if ui
+                            .checkbox(&mut split, "作为一个应用的拆分 APK 安装")
+                            .on_hover_text(
+                                "仅适用于同一应用、同一版本的基础包和拆分包；普通批量 APK 无需勾选",
+                            )
+                            .changed()
+                        {
+                            self.backend.prepare(preparation.paths.clone(), split);
+                        }
+                    }
+                    if hovering {
+                        ui.label(
+                            RichText::new("松开以更换待安装文件")
+                                .small()
+                                .color(positive_text(ui)),
+                        );
+                    }
+                } else {
+                    ui.vertical_centered(|ui| {
+                        let (rect, _) =
+                            ui.allocate_exact_size(Vec2::new(38., 40.), egui::Sense::hover());
+                        let paper = rect.shrink(5.);
+                        ui.painter().rect(
+                            paper,
+                            4.,
+                            GREEN.gamma_multiply(0.09),
+                            Stroke::new(1.5, GREEN),
+                            egui::StrokeKind::Inside,
+                        );
+                        ui.painter().text(
+                            paper.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "APK",
+                            FontId::proportional(10.),
+                            GREEN,
+                        );
+                        ui.label(
+                            RichText::new(if hovering {
+                                "松开以准备安装包"
+                            } else {
+                                "把 APK 拖到这里"
+                            })
+                            .size(18.)
+                            .strong(),
+                        );
+                        ui.label(
+                            RichText::new("支持批量拖入 · 准备后点击安装")
+                                .small()
+                                .color(secondary_text(ui)),
+                        );
+                    });
+                }
                 ui.add_space(8.);
                 ui.columns(2, |columns| {
                     let first_width = columns[0].available_width();
                     if columns[0]
-                        .add_sized([first_width, 40.], primary_button("选择 APK"))
+                        .add_sized(
+                            [first_width, 34.],
+                            egui::Button::new(if snapshot.preparation.is_some() {
+                                "更换 APK"
+                            } else {
+                                "选择 APK"
+                            }),
+                        )
                         .clicked()
                     {
                         self.pick_apks(false);
@@ -600,13 +700,34 @@ impl Drawer {
                     }
                     let second_width = columns[1].available_width();
                     if columns[1]
-                        .add_sized([second_width, 40.], egui::Button::new("安装拆分 APK"))
+                        .add_sized([second_width, 34.], egui::Button::new("选择拆分 APK"))
                         .clicked()
                     {
                         self.pick_apks(true);
                         self.opened = Instant::now();
                     }
                 });
+                ui.add_space(8.);
+                let ready = snapshot
+                    .preparation
+                    .as_ref()
+                    .is_some_and(|p| matches!(p.state, PreparationState::Ready(_)));
+                let label = if selected > 0 {
+                    format!("安装到 {selected} 台设备")
+                } else {
+                    "安装 · 请先选择设备".into()
+                };
+                let clicked = ui
+                    .add_enabled_ui(ready && selected > 0, |ui| {
+                        ui.add_sized([ui.available_width(), 40.], primary_button(&label))
+                    })
+                    .inner
+                    .clicked();
+                if clicked && let Some(preparation) = &snapshot.preparation {
+                    self.backend
+                        .install_prepared(preparation.revision, self.preferences.test_packages);
+                    self.opened = Instant::now();
+                }
             });
     }
 
@@ -1130,6 +1251,25 @@ impl Drawer {
 }
 
 impl eframe::App for Drawer {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        self.drag_hovering = !input.hovered_files.is_empty();
+        if self.drag_hovering {
+            self.opened = Instant::now();
+        }
+        let files = std::mem::take(&mut input.dropped_files);
+        if !files.is_empty() {
+            self.backend.prepare(
+                files.iter().map(|f| f.path().to_path_buf()).collect(),
+                false,
+            );
+            if self.collapsed {
+                self.collapsed = false;
+                ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(WIDTH, HEIGHT)));
+            }
+            self.show(ctx, None);
+        }
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         if self.hidden && platform::window_visible() {
             self.show(ctx, None);
@@ -1181,6 +1321,8 @@ impl eframe::App for Drawer {
                 && !focused
                 && !self.preferences.pinned
                 && self.dialog.is_none()
+                && !self.drag_hovering
+                && !platform::pointer_button_down()
                 && self.opened.elapsed() > Duration::from_millis(600)
             {
                 self.hide(ctx);
@@ -1248,17 +1390,6 @@ impl eframe::App for Drawer {
             return;
         }
         let snapshot = self.backend.snapshot();
-        let files = ctx.input(|i| {
-            i.raw
-                .dropped_files
-                .iter()
-                .map(|f| f.path().to_path_buf())
-                .collect::<Vec<_>>()
-        });
-        if !files.is_empty() {
-            self.backend
-                .submit(files, false, self.preferences.test_packages);
-        }
         egui::Frame::new()
             .fill(ui.visuals().panel_fill)
             .inner_margin(16)

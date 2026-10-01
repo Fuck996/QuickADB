@@ -34,10 +34,15 @@ pub struct Backend {
 }
 
 struct Submission {
-    paths: Vec<PathBuf>,
+    packages: Packages,
     split: bool,
     test: bool,
     targets: Vec<Device>,
+}
+
+enum Packages {
+    Paths(Vec<PathBuf>),
+    Prepared(Vec<Apk>),
 }
 
 struct QueueItem {
@@ -57,6 +62,7 @@ struct Engine {
     lanes: AsyncMutex<BTreeMap<String, mpsc::UnboundedSender<QueueItem>>>,
     cancellations: Mutex<BTreeMap<u64, CancellationToken>>,
     next_job: AtomicU64,
+    next_preparation: AtomicU64,
     stop: CancellationToken,
 }
 
@@ -76,6 +82,7 @@ impl Backend {
             lanes: AsyncMutex::new(BTreeMap::new()),
             cancellations: Mutex::new(BTreeMap::new()),
             next_job: AtomicU64::new(1),
+            next_preparation: AtomicU64::new(1),
             stop: CancellationToken::new(),
         });
         runtime.spawn(engine.clone().monitor());
@@ -85,7 +92,12 @@ impl Backend {
             while let Some(request) = pending.recv().await {
                 submit_engine
                     .clone()
-                    .submit(request.paths, request.split, request.test, request.targets)
+                    .submit(
+                        request.packages,
+                        request.split,
+                        request.test,
+                        request.targets,
+                    )
                     .await;
             }
         });
@@ -292,6 +304,82 @@ impl Backend {
         });
     }
 
+    pub fn prepare(&self, paths: Vec<PathBuf>, split: bool) {
+        if paths.is_empty() {
+            self.clear_preparation();
+            return;
+        }
+        let revision = self.engine.next_preparation.fetch_add(1, Ordering::Relaxed);
+        self.engine
+            .state
+            .lock()
+            .expect("state lock poisoned")
+            .preparation = Some(ApkPreparation {
+            revision,
+            paths: paths.clone(),
+            split,
+            state: PreparationState::Checking,
+        });
+        let engine = self.engine.clone();
+        self.spawn(async move {
+            let result = read_apks(paths, split).await;
+            let mut state = engine.state.lock().expect("state lock poisoned");
+            if let Some(preparation) = &mut state.preparation
+                && preparation.revision == revision
+            {
+                preparation.state = match result {
+                    Ok(apks) => PreparationState::Ready(apks),
+                    Err(error) => PreparationState::Failed(format!("{error:#}")),
+                };
+            }
+        });
+    }
+
+    pub fn clear_preparation(&self) {
+        self.engine
+            .state
+            .lock()
+            .expect("state lock poisoned")
+            .preparation = None;
+    }
+
+    pub fn install_prepared(&self, revision: u64, test: bool) {
+        let mut state = self.engine.state.lock().expect("state lock poisoned");
+        let Some(preparation) = &state.preparation else {
+            return;
+        };
+        if preparation.revision != revision {
+            return;
+        }
+        let PreparationState::Ready(apks) = &preparation.state else {
+            return;
+        };
+        let targets: Vec<_> = state
+            .devices
+            .iter()
+            .filter(|d| d.selected && d.status == DeviceStatus::Online)
+            .cloned()
+            .collect();
+        if targets.is_empty() {
+            state.notice = "请先点击选择至少一台已连接设备，再点击安装".into();
+            return;
+        }
+        if self
+            .submissions
+            .send(Submission {
+                packages: Packages::Prepared(apks.clone()),
+                split: preparation.split,
+                test,
+                targets,
+            })
+            .is_err()
+        {
+            state.notice = "APK 提交队列已关闭".into();
+        } else {
+            state.preparation = None;
+        }
+    }
+
     pub fn submit(&self, paths: Vec<PathBuf>, split: bool, test: bool) {
         let targets: Vec<_> = self
             .snapshot()
@@ -301,13 +389,13 @@ impl Backend {
             .collect();
         if targets.is_empty() {
             self.engine
-                .notice("请先点击选择至少一台已连接设备，再添加 APK");
+                .notice("请先点击选择至少一台已连接设备，再点击安装");
             return;
         }
         if self
             .submissions
             .send(Submission {
-                paths,
+                packages: Packages::Paths(paths),
                 split,
                 test,
                 targets,
@@ -338,7 +426,7 @@ impl Backend {
         if self
             .submissions
             .send(Submission {
-                paths: job.paths.clone(),
+                packages: Packages::Paths(job.paths.clone()),
                 split: job.paths.len() > 1,
                 test: job.test_packages,
                 targets: vec![device.clone()],
@@ -863,30 +951,21 @@ impl Engine {
 
     async fn submit(
         self: Arc<Self>,
-        paths: Vec<PathBuf>,
+        packages: Packages,
         split: bool,
         test: bool,
         targets: Vec<Device>,
     ) {
-        let apks = tokio::task::spawn_blocking(move || {
-            paths.into_iter().map(Apk::read).collect::<Result<Vec<_>>>()
-        })
-        .await;
-        let apks = match apks {
-            Ok(Ok(apks)) => apks,
-            Ok(Err(error)) => {
-                self.notice(&format!("无法添加 APK：{error:#}"));
-                return;
-            }
-            Err(error) => {
-                self.notice(&format!("读取 APK 任务失败：{error}"));
-                return;
-            }
+        let apks = match packages {
+            Packages::Prepared(apks) => apks,
+            Packages::Paths(paths) => match read_apks(paths, split).await {
+                Ok(apks) => apks,
+                Err(error) => {
+                    self.notice(&format!("无法添加 APK：{error:#}"));
+                    return;
+                }
+            },
         };
-        if let Err(error) = validate_group(&apks, split) {
-            self.notice(&format!("无法添加 APK：{error:#}"));
-            return;
-        }
         let groups = if split {
             vec![apks]
         } else {
@@ -1047,6 +1126,19 @@ impl Engine {
 
 pub async fn shell_text(client: &AdbClient, command: &str) -> Result<String> {
     shell_text_with_timeout(client, command, Duration::from_secs(15)).await
+}
+
+async fn read_apks(paths: Vec<PathBuf>, split: bool) -> Result<Vec<Apk>> {
+    tokio::task::spawn_blocking(move || {
+        let apks = paths
+            .into_iter()
+            .map(Apk::read)
+            .collect::<Result<Vec<_>>>()?;
+        validate_group(&apks, split)?;
+        Ok(apks)
+    })
+    .await
+    .context("读取 APK 任务失败")?
 }
 
 pub async fn shell_text_with_timeout(

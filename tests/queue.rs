@@ -2,7 +2,7 @@ mod support;
 use droidmux::pairing::{CredentialStore, StoredPairedDevice};
 use quickadb::{
     engine::Backend,
-    model::{DeviceStatus, Endpoint, JobStage},
+    model::{DeviceStatus, Endpoint, JobStage, PreparationState},
     storage::Storage,
 };
 use std::time::{Duration, Instant};
@@ -30,6 +30,19 @@ fn wait_for_timeout(
         );
         std::thread::sleep(Duration::from_millis(15));
     }
+}
+
+fn prepared_revision(backend: &Backend) -> u64 {
+    wait_for(backend, |s| {
+        s.preparation
+            .as_ref()
+            .is_some_and(|p| matches!(p.state, PreparationState::Ready(_)))
+    });
+    backend
+        .snapshot()
+        .preparation
+        .expect("prepared selection")
+        .revision
 }
 
 #[test]
@@ -258,12 +271,36 @@ fn selection_snapshot_and_device_queues_remain_isolated() {
     });
     let devices = backend.snapshot().devices;
     assert!(devices.iter().all(|d| !d.selected));
+    let first = support::write_apk(&directory, "中文 第一.apk", "test.first", "", 1);
+    let second = support::write_apk(&directory, "第二.apk", "test.second", "", 2);
+    backend.prepare(vec![first.clone(), second.clone()], false);
+    let revision = prepared_revision(&backend);
+    assert!(backend.snapshot().jobs.is_empty());
+    assert!(
+        server_a
+            .records
+            .lock()
+            .expect("A records")
+            .uploads
+            .is_empty()
+    );
+    assert!(
+        server_b
+            .records
+            .lock()
+            .expect("B records")
+            .uploads
+            .is_empty()
+    );
+    backend.install_prepared(revision, false);
+    assert!(backend.snapshot().preparation.is_some());
+    assert!(backend.snapshot().jobs.is_empty());
     for device in &devices {
         backend.toggle(&device.id);
     }
-    let first = support::write_apk(&directory, "中文 第一.apk", "test.first", "", 1);
-    let second = support::write_apk(&directory, "第二.apk", "test.second", "", 2);
-    backend.submit(vec![first.clone(), second.clone()], false, false);
+    backend.install_prepared(revision, false);
+    backend.install_prepared(revision, false);
+    assert!(backend.snapshot().preparation.is_none());
     backend.select_all(false);
     wait_for(&backend, |s| {
         s.jobs
@@ -305,6 +342,86 @@ fn selection_snapshot_and_device_queues_remain_isolated() {
     );
     assert_eq!(backend.snapshot().jobs.len(), 4);
     assert!(backend.snapshot().notice.contains("请先点击选择"));
+    drop(backend);
+}
+
+#[test]
+fn prepared_files_are_not_silently_replaced_before_installing() {
+    let directory = TempDirectory::new();
+    let server = DeviceServer::start(DeviceOptions::default());
+    let backend =
+        Backend::new(Storage::open(directory.0.join("data")).expect("storage")).expect("backend");
+    backend.connect(Endpoint {
+        host: "127.0.0.1".into(),
+        port: server.port,
+        paired_id: None,
+    });
+    wait_for(&backend, |s| {
+        s.devices.iter().any(|d| d.status == DeviceStatus::Online)
+    });
+    let apk = support::write_apk(&directory, "被替换.apk", "test.original", "", 1);
+    backend.prepare(vec![apk.clone()], false);
+    let revision = prepared_revision(&backend);
+    std::fs::write(&apk, b"changed after preparation").expect("replace file");
+    backend.select_all(true);
+    backend.install_prepared(revision, false);
+    wait_for(&backend, |s| s.jobs.len() == 1 && !s.jobs[0].stage.active());
+    assert_eq!(backend.snapshot().jobs[0].stage, JobStage::Failed);
+    assert!(backend.snapshot().jobs[0].detail.contains("发生变化"));
+    assert!(server.records.lock().expect("records").uploads.is_empty());
+    drop(backend);
+}
+
+#[test]
+fn split_preparation_requires_valid_group_and_explicit_install() {
+    let directory = TempDirectory::new();
+    let server = DeviceServer::start(DeviceOptions::default());
+    let backend =
+        Backend::new(Storage::open(directory.0.join("data")).expect("storage")).expect("backend");
+    backend.connect(Endpoint {
+        host: "127.0.0.1".into(),
+        port: server.port,
+        paired_id: None,
+    });
+    wait_for(&backend, |s| {
+        s.devices.iter().any(|d| d.status == DeviceStatus::Online)
+    });
+    backend.select_all(true);
+    let base = support::write_apk(&directory, "base.apk", "test.split", "", 7);
+    let split = support::write_apk(&directory, "config.zh.apk", "test.split", "config.zh", 7);
+    backend.prepare(vec![base.clone(), split.clone()], false);
+    wait_for(&backend, |s| {
+        s.preparation
+            .as_ref()
+            .is_some_and(|p| matches!(p.state, PreparationState::Failed(_)))
+    });
+    let invalid = backend.snapshot().preparation.expect("failed selection");
+    backend.install_prepared(invalid.revision, false);
+    assert!(backend.snapshot().jobs.is_empty());
+    backend.prepare(vec![base.clone(), split.clone()], true);
+    let revision = prepared_revision(&backend);
+    backend.install_prepared(invalid.revision, false);
+    assert!(backend.snapshot().preparation.is_some());
+    assert!(backend.snapshot().jobs.is_empty());
+    assert!(server.records.lock().expect("records").uploads.is_empty());
+    backend.install_prepared(revision, false);
+    wait_for(&backend, |s| s.jobs.len() == 1 && !s.jobs[0].stage.active());
+    assert_eq!(backend.snapshot().jobs[0].stage, JobStage::Succeeded);
+    assert_eq!(
+        server.records.lock().expect("records").uploads,
+        vec![
+            std::fs::read(base).expect("base"),
+            std::fs::read(split).expect("split")
+        ]
+    );
+    backend.prepare(vec![directory.0.join("missing.apk")], false);
+    backend.clear_preparation();
+    backend.prepare(vec![directory.0.join("base.apk")], false);
+    let new_revision = prepared_revision(&backend);
+    assert!(new_revision > revision);
+    backend.clear_preparation();
+    assert!(backend.snapshot().preparation.is_none());
+    assert_eq!(backend.snapshot().jobs.len(), 1);
     drop(backend);
 }
 

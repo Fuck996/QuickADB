@@ -118,10 +118,26 @@ pub struct Job {
 pub struct Snapshot {
     pub devices: Vec<Device>,
     pub jobs: Vec<Job>,
+    pub preparation: Option<ApkPreparation>,
     pub discovered: Vec<DiscoveredDevice>,
     pub notice: String,
     pub connecting: bool,
     pub pairing: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ApkPreparation {
+    pub revision: u64,
+    pub paths: Vec<PathBuf>,
+    pub split: bool,
+    pub state: PreparationState,
+}
+
+#[derive(Clone, Debug)]
+pub enum PreparationState {
+    Checking,
+    Ready(Vec<crate::apk::Apk>),
+    Failed(String),
 }
 
 #[derive(Clone, Debug)]

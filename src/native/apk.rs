@@ -66,7 +66,7 @@ pub fn validate_group(apks: &[Apk], split_group: bool) -> Result<()> {
     if !split_group {
         ensure!(
             apks.iter().all(|a| a.split.is_empty()),
-            "包含拆分 APK，请通过“安装拆分 APK”将基础包与拆分包作为一组添加"
+            "包含拆分 APK，请通过“选择拆分 APK”将基础包与拆分包作为一组添加"
         );
         return Ok(());
     }

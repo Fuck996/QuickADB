@@ -13,6 +13,7 @@ use windows_sys::Win32::{
     },
     UI::{
         Controls::{LIM_SMALL, LoadIconMetric},
+        Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON},
         WindowsAndMessaging::{
             FindWindowW, GetCursorPos, MB_ICONERROR, MB_OK, MessageBoxW, SW_SHOW,
             SetForegroundWindow, ShowWindow,
@@ -129,6 +130,10 @@ pub fn show_error(error: &str) {
             MB_ICONERROR | MB_OK,
         );
     }
+}
+
+pub fn pointer_button_down() -> bool {
+    unsafe { GetAsyncKeyState(VK_LBUTTON as i32) < 0 || GetAsyncKeyState(VK_RBUTTON as i32) < 0 }
 }
 
 pub fn window_visible() -> bool {
