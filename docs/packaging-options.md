@@ -27,4 +27,4 @@ WPF 不支持通过 Native AOT 简单达成此目标，需要重新选择界面�
 - WPF 裁剪限制：https://learn.microsoft.com/en-us/dotnet/core/deploying/trimming/incompatibilities#wpf
 - Native AOT：https://learn.microsoft.com/en-us/dotnet/core/deploying/native-aot/
 
-当前等待用户确定打包口径，尚未实施方案 2。当前工程只有安装核心与资源基础，完整应用尚未完成。
+用户已确认方案 2：原生应用，不释放 EXE/DLL 运行依赖，设置和设备授权数据正常保存。原 WPF 原型保存在本地 checkpoint，后续实现需验证静态依赖、USB、无线配对与安装链路。

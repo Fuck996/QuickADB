@@ -8,3 +8,4 @@ logs/
 *.suo
 *.tmp
 scratch/
+target/

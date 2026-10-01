@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
-$assets = Join-Path $PSScriptRoot '..\src\QuickADB\Assets'
+$assets = Join-Path $PSScriptRoot '..\assets'
 $source = [System.Drawing.Image]::FromFile((Join-Path $assets 'AppIcon.png'))
 $sizes = @(16, 24, 32, 48, 64, 128, 256)
 $images = @()

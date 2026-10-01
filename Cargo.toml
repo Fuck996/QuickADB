@@ -1,0 +1,44 @@
+[package]
+name = "quickadb"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "常驻托盘的 Android APK 安装抽屉"
+
+[lib]
+path = "src/native/lib.rs"
+
+[[bin]]
+name = "QuickADB"
+path = "src/native/main.rs"
+
+[dependencies]
+droidmux = { path = "vendor/droidmux/crates/droidmux", default-features = false, features = ["tcp", "usb", "pairing", "mdns", "shell"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "sync", "time", "fs", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+anyhow = "1"
+async-trait = "0.1"
+secrecy = "0.10"
+bytes = "1"
+tokio-util = { version = "0.7", features = ["rt"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Memory", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
+eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts", "accesskit"] }
+tray-icon = "0.21"
+rfd = "0.15"
+image = { version = "0.25", default-features = false, features = ["png", "ico"] }
+
+[build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
