@@ -981,6 +981,87 @@ impl Drawer {
                 }
             });
         ui.add_space(8.);
+        ui.label(
+            RichText::new(format!("局域网发现 · {} 个服务", snapshot.discovered.len())).strong(),
+        );
+        if snapshot.discovered.is_empty() {
+            ui.label(
+                RichText::new("暂未发现设备，请确认手机已开启无线调试并与电脑在同一局域网。")
+                    .small()
+                    .color(secondary_text(ui)),
+            );
+        } else {
+            ui.label(
+                RichText::new("自动更新 · 点击设备选择连接方式")
+                    .small()
+                    .color(secondary_text(ui)),
+            );
+            let paired = self.storage.paired_devices();
+            egui::ScrollArea::vertical()
+                .id_salt("discovered-devices")
+                .max_height(144.)
+                .min_scrolled_height(0.)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for device in &snapshot.discovered {
+                        let endpoint = &device.endpoint;
+                        let known_name = snapshot.devices.iter().find_map(|known| {
+                            known.endpoint.as_ref().filter(|address| address.host == endpoint.host && address.port == endpoint.port).map(|_| known.name.as_str())
+                        });
+                        let name = known_name.unwrap_or(&device.name);
+                        let authorized_id = device.paired_id().filter(|id| {
+                            paired.iter().any(|record| record.device_id == *id)
+                        });
+                        let kind = match device.service_type {
+                            AdbServiceType::Pairing => "可配对 · 填入配对端口",
+                            AdbServiceType::TlsConnect if authorized_id.is_some() => "已配对 · 自动获取连接端口",
+                            AdbServiceType::TlsConnect => "无配对记录 · 在手机打开配对码弹窗",
+                            AdbServiceType::Legacy => "传统 TCP · 填入连接端口",
+                        };
+                        let response = egui::Frame::new()
+                            .fill(ui.visuals().widgets.inactive.bg_fill)
+                            .corner_radius(8)
+                            .inner_margin(10)
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.add(egui::Label::new(RichText::new(name).strong()).truncate());
+                                ui.label(RichText::new(format!("{}:{} · {kind}", endpoint.host, endpoint.port)).small().color(secondary_text(ui)));
+                            }).response.interact(egui::Sense::click());
+                        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), format!("选择{name} · {kind}")));
+                        let response = response.on_hover_text(if device.model_advertised || known_name.is_some() {
+                            device.fullname.as_str()
+                        } else {
+                            "设备没有广播型号，当前显示其真实服务名称。连接授权后可读取型号并设置备注。"
+                        });
+                        if response.clicked() {
+                            *host = endpoint.host.clone();
+                            pairing_port.clear();
+                            port.clear();
+                            code.clear();
+                            paired_id.clear();
+                            match device.service_type {
+                                AdbServiceType::Pairing => {
+                                    *mode = 0;
+                                    *pairing_port = endpoint.port.to_string();
+                                }
+                                AdbServiceType::TlsConnect => {
+                                    if let Some(id) = authorized_id {
+                                        *mode = 1;
+                                        *paired_id = id.into();
+                                    } else {
+                                        *mode = 0;
+                                    }
+                                }
+                                AdbServiceType::Legacy => {
+                                    *mode = 2;
+                                    *port = endpoint.port.to_string();
+                                }
+                            }
+                        }
+                    }
+                });
+        }
+        ui.add_space(8.);
         if *mode == 1 {
             let paired = self.storage.paired_devices();
             if paired.is_empty() {
@@ -1073,69 +1154,6 @@ impl Drawer {
                         .color(secondary_text(ui)),
                     );
                 });
-        }
-        let discovered: Vec<_> = snapshot
-            .discovered
-            .iter()
-            .filter(|device| match *mode {
-                0 => device.service_type == AdbServiceType::Pairing,
-                1 => device.paired_id().is_some_and(|id| {
-                    self.storage
-                        .paired_devices()
-                        .iter()
-                        .any(|d| d.device_id == id)
-                }),
-                _ => device.service_type == AdbServiceType::Legacy,
-            })
-            .collect();
-        if !discovered.is_empty() {
-            egui::CollapsingHeader::new("局域网发现的设备").show(ui, |ui| {
-                egui::ScrollArea::vertical().max_height(128.).show(ui, |ui| {
-                    for device in discovered {
-                        let endpoint = &device.endpoint;
-                        let known_name = snapshot.devices.iter().find_map(|known| {
-                            known.endpoint.as_ref().filter(|address| address.host == endpoint.host && address.port == endpoint.port).map(|_| known.name.as_str())
-                        });
-                        let name = known_name.unwrap_or(&device.name);
-                        let kind = match device.service_type {
-                            AdbServiceType::Pairing => "配对服务 · 填入配对端口",
-                            AdbServiceType::TlsConnect => "无线连接 · 自动获取端口",
-                            AdbServiceType::Legacy => "传统 TCP · 填入连接端口",
-                        };
-                        let response = egui::Frame::new()
-                            .fill(ui.visuals().widgets.inactive.bg_fill)
-                            .corner_radius(8)
-                            .inner_margin(10)
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.add(egui::Label::new(RichText::new(name).strong()).truncate());
-                                ui.label(RichText::new(format!("{}:{} · {kind}", endpoint.host, endpoint.port)).small().color(secondary_text(ui)));
-                            }).response.interact(egui::Sense::click());
-                        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), format!("填入{name} · {kind}")));
-                        let response = response.on_hover_text(if device.model_advertised || known_name.is_some() {
-                            device.fullname.as_str()
-                        } else {
-                            "设备没有广播型号，当前显示其真实服务名称。连接授权后可读取型号并设置备注。"
-                        });
-                        if response.clicked() {
-                            if *host != endpoint.host {
-                                pairing_port.clear();
-                                port.clear();
-                                code.clear();
-                            }
-                            *host = endpoint.host.clone();
-                            if device.service_type == AdbServiceType::Pairing {
-                                *pairing_port = endpoint.port.to_string();
-                            } else if let Some(id) = device.paired_id() {
-                                *paired_id = id.into();
-                                port.clear();
-                            } else {
-                                *port = endpoint.port.to_string();
-                            }
-                        }
-                    }
-                });
-            });
         }
         ui.add_space(10.);
         if !port.trim().is_empty() && !port.trim().parse::<u16>().is_ok_and(|p| p > 0) {
