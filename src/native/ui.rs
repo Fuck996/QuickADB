@@ -14,10 +14,10 @@ use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem},
 };
 
-const WIDTH: f32 = 408.;
-const HEIGHT: f32 = 608.;
+const WIDTH: f32 = 440.;
+const HEIGHT: f32 = 660.;
 const GREEN: Color32 = Color32::from_rgb(37, 173, 115);
-const MUTED: Color32 = Color32::from_rgb(133, 144, 154);
+const PRIMARY_GREEN: Color32 = Color32::from_rgb(20, 133, 84);
 
 pub fn run(storage: Arc<Storage>, backend: Backend) -> eframe::Result {
     let settings = storage.settings();
@@ -202,8 +202,25 @@ impl Drawer {
             },
             ..Default::default()
         };
+        style.visuals.widgets.noninteractive.fg_stroke.color = if self.preferences.dark {
+            Color32::from_rgb(223, 231, 238)
+        } else {
+            Color32::from_rgb(41, 50, 59)
+        };
+        style.visuals.weak_text_color = Some(if self.preferences.dark {
+            Color32::from_rgb(163, 175, 187)
+        } else {
+            Color32::from_rgb(99, 111, 123)
+        });
         style.visuals.selection.bg_fill = GREEN.gamma_multiply(0.28);
-        style.visuals.selection.stroke = Stroke::new(1., GREEN);
+        style.visuals.selection.stroke = Stroke::new(
+            1.,
+            if self.preferences.dark {
+                GREEN
+            } else {
+                PRIMARY_GREEN
+            },
+        );
         style.visuals.panel_fill = if self.preferences.dark {
             Color32::from_rgb(24, 29, 34)
         } else {
@@ -217,21 +234,27 @@ impl Drawer {
         style.visuals.widgets.inactive.corner_radius = 7.into();
         style.visuals.widgets.hovered.corner_radius = 7.into();
         style.visuals.widgets.active.corner_radius = 7.into();
-        style.spacing.item_spacing = Vec2::new(8., 7.);
-        style.spacing.button_padding = Vec2::new(10., 7.);
+        style.spacing.item_spacing = Vec2::new(8., 8.);
+        style.spacing.button_padding = Vec2::new(12., 8.);
         style
             .text_styles
-            .insert(egui::TextStyle::Body, FontId::proportional(13.));
+            .insert(egui::TextStyle::Body, FontId::proportional(15.));
         style
             .text_styles
-            .insert(egui::TextStyle::Button, FontId::proportional(13.));
+            .insert(egui::TextStyle::Button, FontId::proportional(15.));
         style
             .text_styles
-            .insert(egui::TextStyle::Small, FontId::proportional(11.));
+            .insert(egui::TextStyle::Small, FontId::proportional(13.));
         style
             .text_styles
-            .insert(egui::TextStyle::Heading, FontId::proportional(17.));
-        ctx.set_global_style(style);
+            .insert(egui::TextStyle::Heading, FontId::proportional(19.));
+        let theme = if self.preferences.dark {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        };
+        ctx.set_style_of(theme, style);
+        ctx.set_theme(theme);
     }
 
     fn persist(&self) {
@@ -309,8 +332,12 @@ impl Drawer {
         let response = ui.horizontal(|ui| {
             ui.add(egui::Image::new(&self.icon).fit_to_exact_size(Vec2::splat(36.)));
             ui.vertical(|ui| {
-                ui.label(RichText::new("QuickADB").size(17.).strong());
-                ui.label(RichText::new("随手安装，随时测试").size(11.).color(MUTED));
+                ui.label(RichText::new("QuickADB").size(20.).strong());
+                ui.label(
+                    RichText::new("随手安装，随时测试")
+                        .size(13.)
+                        .color(secondary_text(ui)),
+                );
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
@@ -359,7 +386,7 @@ impl Drawer {
                 ui.label(
                     RichText::new(format!("已选 {selected} 台"))
                         .small()
-                        .color(GREEN),
+                        .color(positive_text(ui)),
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -390,14 +417,14 @@ impl Drawer {
                         "USB 连接后开启调试并在手机上授权，\n也可使用同一局域网的无线调试。",
                     )
                     .small()
-                    .color(MUTED),
+                    .color(secondary_text(ui)),
                 );
                 ui.add_space(8.);
             });
         } else {
             egui::ScrollArea::vertical()
                 .id_salt("devices")
-                .max_height(156.)
+                .max_height(176.)
                 .show(ui, |ui| {
                     for device in &snapshot.devices {
                         ui.horizontal(|ui| {
@@ -438,7 +465,7 @@ impl Drawer {
                                     frame
                                         .show(ui, |ui| {
                                             ui.set_width(row_width - 20.);
-                                            ui.set_min_height(36.);
+                                            ui.set_min_height(42.);
                                             ui.horizontal(|ui| {
                                                 ui.label(
                                                     RichText::new(if device.selected {
@@ -449,13 +476,13 @@ impl Drawer {
                                                     .color(if device.selected {
                                                         GREEN
                                                     } else {
-                                                        MUTED
+                                                        secondary_text(ui)
                                                     }),
                                                 );
                                                 ui.vertical(|ui| {
                                                     ui.add(
                                                         egui::Label::new(
-                                                            RichText::new(&device.name).size(12.),
+                                                            RichText::new(&device.name).size(14.),
                                                         )
                                                         .truncate(),
                                                     )
@@ -464,7 +491,7 @@ impl Drawer {
                                                         egui::Label::new(
                                                             RichText::new(status)
                                                                 .small()
-                                                                .color(MUTED),
+                                                                .color(secondary_text(ui)),
                                                         )
                                                         .truncate(),
                                                     );
@@ -526,7 +553,7 @@ impl Drawer {
             })
             .stroke(Stroke::new(1.3, border))
             .corner_radius(12)
-            .inner_margin(18)
+            .inner_margin(20)
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.vertical_centered(|ui| {
@@ -553,7 +580,7 @@ impl Drawer {
                         } else {
                             "把 APK 拖到这里"
                         })
-                        .size(16.)
+                        .size(18.)
                         .strong(),
                     );
                     ui.label(
@@ -563,23 +590,27 @@ impl Drawer {
                             "先点击选择设备 · 可单选或多选".into()
                         })
                         .small()
-                        .color(MUTED),
+                        .color(secondary_text(ui)),
                     );
-                    ui.add_space(3.);
-                    ui.horizontal(|ui| {
-                        ui.add_space(61.);
-                        if ui.button("选择 APK").clicked() {
-                            self.pick_apks(false);
-                            self.opened = Instant::now();
-                        }
-                        if ui
-                            .add(egui::Button::new("安装拆分 APK").frame(false))
-                            .clicked()
-                        {
-                            self.pick_apks(true);
-                            self.opened = Instant::now();
-                        }
-                    });
+                });
+                ui.add_space(8.);
+                ui.columns(2, |columns| {
+                    let first_width = columns[0].available_width();
+                    if columns[0]
+                        .add_sized([first_width, 40.], primary_button("选择 APK"))
+                        .clicked()
+                    {
+                        self.pick_apks(false);
+                        self.opened = Instant::now();
+                    }
+                    let second_width = columns[1].available_width();
+                    if columns[1]
+                        .add_sized([second_width, 40.], egui::Button::new("安装拆分 APK"))
+                        .clicked()
+                    {
+                        self.pick_apks(true);
+                        self.opened = Instant::now();
+                    }
                 });
             });
     }
@@ -593,13 +624,17 @@ impl Drawer {
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         ui.add(
-                            egui::Label::new(RichText::new(&job.title).strong().size(12.))
+                            egui::Label::new(RichText::new(&job.title).strong().size(14.))
                                 .truncate(),
                         )
                         .on_hover_text(&job.title);
                         ui.add(
-                            egui::Label::new(RichText::new(&job.device_name).small().color(MUTED))
-                                .truncate(),
+                            egui::Label::new(
+                                RichText::new(&job.device_name)
+                                    .small()
+                                    .color(secondary_text(ui)),
+                            )
+                            .truncate(),
                         )
                         .on_hover_text(&job.device_name);
                     },
@@ -641,7 +676,7 @@ impl Drawer {
                         bytes(job.bytes_per_second)
                     ))
                     .small()
-                    .color(MUTED),
+                    .color(secondary_text(ui)),
                 );
             } else {
                 ui.horizontal(|ui| {
@@ -649,9 +684,15 @@ impl Drawer {
                         ui.add(egui::Spinner::new().size(12.));
                     }
                     let color = match job.stage {
-                        JobStage::Succeeded => GREEN,
-                        JobStage::Failed | JobStage::Unknown => Color32::from_rgb(214, 105, 82),
-                        _ => MUTED,
+                        JobStage::Succeeded => positive_text(ui),
+                        JobStage::Failed | JobStage::Unknown => {
+                            if self.preferences.dark {
+                                Color32::from_rgb(214, 105, 82)
+                            } else {
+                                Color32::from_rgb(181, 76, 54)
+                            }
+                        }
+                        _ => secondary_text(ui),
                     };
                     ui.label(RichText::new(job.stage.label()).small().color(color));
                 });
@@ -670,53 +711,242 @@ impl Drawer {
         });
     }
 
+    fn connection_form(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &Snapshot,
+        dialog: &mut Dialog,
+        close: &mut bool,
+    ) {
+        let Dialog::Connect {
+            mode,
+            host,
+            port,
+            pairing_port,
+            code,
+            paired_id,
+        } = dialog
+        else {
+            return;
+        };
+        modal_heading(ui, "连接设备", close);
+        ui.label(
+            RichText::new("无线连接需在同一局域网，USB 设备会自动识别。")
+                .size(13.)
+                .color(secondary_text(ui)),
+        );
+        ui.add_space(10.);
+        let tab_width = (ui.available_width() - 16.) / 3.;
+        ui.horizontal(|ui| {
+            for (value, label) in [(0, "无线配对"), (1, "已配对设备"), (2, "TCP 连接")] {
+                let active = *mode == value;
+                if ui
+                    .add_sized(
+                        [tab_width, 36.],
+                        egui::Button::new(RichText::new(label).color(if active {
+                            Color32::WHITE
+                        } else {
+                            ui.visuals().text_color()
+                        }))
+                        .fill(if active {
+                            PRIMARY_GREEN
+                        } else {
+                            ui.visuals().widgets.inactive.bg_fill
+                        })
+                        .stroke(Stroke::NONE)
+                        .corner_radius(8),
+                    )
+                    .clicked()
+                {
+                    *mode = value;
+                    code.clear();
+                }
+            }
+        });
+        ui.add_space(8.);
+        egui::Frame::new()
+            .fill(if self.preferences.dark {
+                Color32::from_rgb(29, 48, 42)
+            } else {
+                Color32::from_rgb(238, 248, 243)
+            })
+            .corner_radius(10)
+            .inner_margin(12)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                if *mode == 0 {
+                    ui.label(RichText::new("在手机上准备配对").strong());
+                    ui.label(RichText::new("开发者选项 → 无线调试 → 使用配对码配对设备").size(13.));
+                    ui.label(
+                        RichText::new("适用于 Android 11 及以上；请保持配对弹窗打开。")
+                            .small()
+                            .color(secondary_text(ui)),
+                    );
+                } else if *mode == 1 {
+                    ui.label(RichText::new("连接已授权的手机").strong());
+                    ui.label(
+                        RichText::new(
+                            "手机重新开启无线调试后，连接端口可能变化。请填写主页显示的当前端口。",
+                        )
+                        .size(13.)
+                        .color(secondary_text(ui)),
+                    );
+                } else {
+                    ui.label(RichText::new("连接已启用 TCP 调试的设备").strong());
+                    ui.label(
+                        RichText::new("首次使用可先接 USB，在设备详情中选择“通过 USB 转无线”。")
+                            .size(13.)
+                            .color(secondary_text(ui)),
+                    );
+                }
+            });
+        ui.add_space(8.);
+        if *mode == 1 {
+            let saved = self.storage.settings();
+            let paired: Vec<_> = saved
+                .endpoints
+                .iter()
+                .filter(|e| e.paired_id.is_some())
+                .collect();
+            if paired.is_empty() {
+                ui.label("还没有配对记录，请先完成无线配对。");
+                if ui.button("去无线配对").clicked() {
+                    *mode = 0;
+                }
+            } else {
+                ui.label(RichText::new("选择设备记录").strong());
+                let selected = paired
+                    .iter()
+                    .find(|e| e.paired_id.as_ref() == Some(paired_id));
+                let label = selected
+                    .map(|e| format!("{}:{}", e.host, e.port))
+                    .unwrap_or_else(|| "请选择已配对的设备".into());
+                egui::ComboBox::from_id_salt("paired-device")
+                    .width(ui.available_width())
+                    .selected_text(label)
+                    .show_ui(ui, |ui| {
+                        for endpoint in paired {
+                            if ui
+                                .selectable_label(
+                                    endpoint.paired_id.as_ref() == Some(paired_id),
+                                    format!("{}:{}", endpoint.host, endpoint.port),
+                                )
+                                .clicked()
+                            {
+                                *host = endpoint.host.clone();
+                                *port = endpoint.port.to_string();
+                                *paired_id = endpoint.paired_id.clone().expect("paired endpoint");
+                            }
+                        }
+                    });
+                ui.add_space(6.);
+            }
+        }
+        field(ui, "手机 IP 地址", host, false, "例如 192.168.1.8");
+        if *mode == 0 {
+            ui.columns(2, |columns| {
+                field(
+                    &mut columns[0],
+                    "配对端口",
+                    pairing_port,
+                    false,
+                    "配对弹窗中的端口",
+                );
+                field(&mut columns[1], "六位配对码", code, true, "输入 6 位数字");
+            });
+        }
+        field(
+            ui,
+            "连接端口",
+            port,
+            false,
+            if *mode == 2 {
+                "通常为 5555，以设备设置为准"
+            } else {
+                "无线调试主页中的端口"
+            },
+        );
+        if *mode == 0 {
+            ui.label(
+                RichText::new("连接端口在“无线调试”主页查看，与配对端口不同。")
+                    .small()
+                    .color(secondary_text(ui)),
+            );
+        }
+        if !snapshot.discovered.is_empty() {
+            egui::CollapsingHeader::new("发现的无线连接地址").show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height(70.).show(ui, |ui| {
+                    for endpoint in &snapshot.discovered {
+                        if ui
+                            .button(format!("{}:{}", endpoint.host, endpoint.port))
+                            .clicked()
+                        {
+                            *host = endpoint.host.clone();
+                            *port = endpoint.port.to_string();
+                        }
+                    }
+                });
+            });
+        }
+        ui.add_space(10.);
+        let valid = !host.trim().is_empty()
+            && port.parse::<u16>().is_ok_and(|p| p > 0)
+            && (*mode != 0
+                || (pairing_port.parse::<u16>().is_ok_and(|p| p > 0)
+                    && code.len() == 6
+                    && code.bytes().all(|b| b.is_ascii_digit())))
+            && (*mode != 1 || !paired_id.is_empty());
+        if snapshot.pairing {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("正在验证配对码…");
+            });
+        }
+        let text = if *mode == 0 {
+            "配对并连接"
+        } else {
+            "连接设备"
+        };
+        if ui
+            .add_enabled_ui(valid && !snapshot.pairing, |ui| {
+                ui.add_sized([ui.available_width(), 42.], primary_button(text))
+            })
+            .inner
+            .clicked()
+        {
+            let connection_port = port.parse().expect("validated port");
+            if *mode == 0 {
+                self.backend.pair(
+                    host.trim().into(),
+                    pairing_port.parse().expect("validated pairing port"),
+                    code.clone(),
+                    connection_port,
+                );
+            } else {
+                self.backend.connect(Endpoint {
+                    host: host.trim().into(),
+                    port: connection_port,
+                    paired_id: if *mode == 1 {
+                        Some(paired_id.clone())
+                    } else {
+                        None
+                    },
+                });
+            }
+            code.clear();
+            *close = true;
+        }
+    }
+
     fn dialogs(&mut self, ctx: &egui::Context, snapshot: &Snapshot) {
         let Some(mut dialog) = self.dialog.take() else {
             return;
         };
         let mut close = false;
-        let response = egui::Modal::new(egui::Id::new("drawer-dialog")).show(ctx, |ui| {
-            ui.set_width(326.);
+        let response = egui::Modal::new(egui::Id::new("drawer-dialog")).frame(egui::Frame::popup(&ctx.global_style()).corner_radius(14).inner_margin(16)).show(ctx, |ui| {
+            ui.set_width(368.);
             match &mut dialog {
-                Dialog::Connect { mode, host, port, pairing_port, code, paired_id } => {
-                    modal_heading(ui, "连接设备", &mut close);
-                    ui.horizontal(|ui| { ui.selectable_value(mode, 0, "新设备配对"); ui.selectable_value(mode, 1, "已配对"); ui.selectable_value(mode, 2, "传统 TCP"); });
-                    ui.add_space(6.);
-                    if *mode == 0 {
-                        ui.label(RichText::new("Android 11+：打开“无线调试 → 使用配对码配对”。配对端口和连接端口不同。").small().color(MUTED));
-                    } else if *mode == 1 {
-                        let saved = self.storage.settings();
-                        egui::ComboBox::from_id_salt("paired-device").selected_text(if paired_id.is_empty() { "选择已配对设备" } else { paired_id.as_str() }).show_ui(ui, |ui| {
-                            for endpoint in saved.endpoints.iter().filter(|e| e.paired_id.is_some()) {
-                                if ui.selectable_label(endpoint.paired_id.as_ref() == Some(paired_id), format!("{} · {}:{}", endpoint.paired_id.as_deref().unwrap_or(""), endpoint.host, endpoint.port)).clicked() {
-                                    *host = endpoint.host.clone(); *port = endpoint.port.to_string(); *paired_id = endpoint.paired_id.clone().unwrap_or_default();
-                                }
-                            }
-                        });
-                        ui.label(RichText::new("填入无线调试主页显示的当前连接端口。").small().color(MUTED));
-                    } else { ui.label(RichText::new("适用于已启用 TCP 调试的设备，或在设备详情中通过 USB 转无线。").small().color(MUTED)); }
-                    field(ui, "手机 IP 地址", host, false);
-                    if *mode == 0 { field(ui, "配对端口", pairing_port, false); field(ui, "六位配对码", code, true); }
-                    field(ui, "连接端口", port, false);
-                    if !snapshot.discovered.is_empty() {
-                        egui::CollapsingHeader::new("局域网发现的地址").show(ui, |ui| {
-                            for endpoint in &snapshot.discovered {
-                                if ui.small_button(format!("{}:{}", endpoint.host, endpoint.port)).clicked() { *host = endpoint.host.clone(); *port = endpoint.port.to_string(); }
-                            }
-                        });
-                    }
-                    ui.add_space(8.);
-                    let valid = !host.trim().is_empty() && port.parse::<u16>().is_ok_and(|p| p > 0)
-                        && (*mode != 0 || (pairing_port.parse::<u16>().is_ok_and(|p| p > 0) && code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit())))
-                        && (*mode != 1 || !paired_id.is_empty());
-                    if snapshot.pairing { ui.horizontal(|ui| { ui.spinner(); ui.label("正在验证配对码…"); }); }
-                    if ui.add_enabled(valid && !snapshot.pairing, primary_button(if *mode == 0 { "配对并连接" } else { "连接设备" })).clicked() {
-                        let connection_port = port.parse().expect("validated port");
-                        if *mode == 0 { self.backend.pair(host.trim().into(), pairing_port.parse().expect("validated pairing port"), code.clone(), connection_port); }
-                        else { self.backend.connect(Endpoint { host: host.trim().into(), port: connection_port, paired_id: if *mode == 1 { Some(paired_id.clone()) } else { None } }); }
-                        code.clear(); close = true;
-                    }
-                }
+                Dialog::Connect { .. } => self.connection_form(ui, snapshot, &mut dialog, &mut close),
                 Dialog::Settings => {
                     modal_heading(ui, "设置", &mut close);
                     ui.label(RichText::new("常驻行为").strong());
@@ -733,14 +963,14 @@ impl Drawer {
                     ui.label(RichText::new("外观与安装").strong());
                     if ui.checkbox(&mut self.preferences.dark, "深色外观").changed() { self.apply_style(ctx); self.persist(); }
                     if ui.checkbox(&mut self.preferences.test_packages, "允许标记为 testOnly 的测试 APK").changed() { self.persist(); }
-                    ui.label(RichText::new("默认覆盖更新并保留应用数据。").small().color(MUTED));
+                    ui.label(RichText::new("默认覆盖更新并保留应用数据。").small().color(secondary_text(ui)));
                     ui.add_space(8.);
                     ui.label(RichText::new("数据目录").strong());
                     ui.label(RichText::new(self.storage.directory.display().to_string()).small());
-                    ui.label(RichText::new("授权密钥由当前 Windows 账号保护。").small().color(MUTED));
+                    ui.label(RichText::new("授权密钥由当前 Windows 账号保护。").small().color(secondary_text(ui)));
                     if ui.small_button("复制数据目录").clicked() { ctx.copy_text(self.storage.directory.display().to_string()); }
                     ui.separator();
-                    ui.label(RichText::new(concat!("QuickADB ", env!("CARGO_PKG_VERSION"))).small().color(MUTED));
+                    ui.label(RichText::new(concat!("QuickADB ", env!("CARGO_PKG_VERSION"))).small().color(secondary_text(ui)));
                     if ui.small_button("复制开源组件许可").clicked() {
                         ctx.copy_text(include_str!("../../assets/ThirdPartyNotices.txt").into());
                     }
@@ -750,7 +980,7 @@ impl Drawer {
                     egui::ScrollArea::vertical().max_height(310.).show(ui, |ui| {
                         for device in &snapshot.devices {
                             ui.horizontal(|ui| {
-                                ui.vertical(|ui| { ui.label(RichText::new(&device.name).strong()); ui.label(RichText::new(format!("{} · {}", device.transport, device.status.label())).small().color(MUTED)); });
+                                ui.vertical(|ui| { ui.label(RichText::new(&device.name).strong()); ui.label(RichText::new(format!("{} · {}", device.transport, device.status.label())).small().color(secondary_text(ui))); });
                                 if device.status != DeviceStatus::Online && device.status != DeviceStatus::Connecting && ui.small_button("重新连接").clicked() { self.backend.retry_connection(device.id.clone()); }
                                 if device.endpoint.is_some() && device.status == DeviceStatus::Online && ui.small_button("断开").clicked() { self.backend.disconnect(device.id.clone()); }
                             });
@@ -774,7 +1004,7 @@ impl Drawer {
                     ui.label(format!("序列号：{}", device.serial));
                     ui.label(format!("Android：{}", device.android));
                     if !device.detail.is_empty() { ui.label(&device.detail); }
-                    field(ui, "设备备注", alias, false);
+                    field(ui, "设备备注", alias, false, "为设备起一个容易识别的名字");
                     if ui.add_enabled(!device.serial.is_empty(), egui::Button::new("保存备注")).clicked() {
                         self.backend.set_alias(device, alias);
                         close = true;
@@ -789,9 +1019,9 @@ impl Drawer {
                 Dialog::Tcp { device, host, port } => {
                     modal_heading(ui, "USB 转无线", &mut close);
                     ui.label(format!("将 {} 的调试服务切换到 TCP。", device.name));
-                    ui.label(RichText::new("手机与电脑需处于可信的同一局域网。该操作会重启手机调试服务，USB 连接可能中断。").small().color(MUTED));
-                    field(ui, "手机当前局域网 IP", host, false);
-                    field(ui, "TCP 调试端口", port, false);
+                    ui.label(RichText::new("手机与电脑需处于可信的同一局域网。该操作会重启手机调试服务，USB 连接可能中断。").small().color(secondary_text(ui)));
+                    field(ui, "手机当前局域网 IP", host, false, "例如 192.168.1.8");
+                    field(ui, "TCP 调试端口", port, false, "5555");
                     if ui.add_enabled(!host.trim().is_empty() && port.parse::<u16>().is_ok_and(|p| p > 0), primary_button("启用并连接")).clicked() { self.backend.enable_tcp(device.id.clone(), host.trim().into(), port.parse().expect("validated port")); close = true; }
                 }
                 Dialog::Exit => {
@@ -960,7 +1190,7 @@ impl eframe::App for Drawer {
                         ui.label(
                             RichText::new(format!("{count} 项进行中"))
                                 .small()
-                                .color(GREEN),
+                                .color(positive_text(ui)),
                         );
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -984,7 +1214,9 @@ impl eframe::App for Drawer {
                             ui.add_space(18.);
                             ui.vertical_centered(|ui| {
                                 ui.label(
-                                    RichText::new("安装结果会显示在这里").small().color(MUTED),
+                                    RichText::new("安装结果会显示在这里")
+                                        .small()
+                                        .color(secondary_text(ui)),
                                 );
                             });
                         }
@@ -994,11 +1226,13 @@ impl eframe::App for Drawer {
                     });
                 if !snapshot.notice.is_empty() {
                     ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(&snapshot.notice)
-                                .small()
-                                .color(Color32::from_rgb(207, 134, 64)),
-                        );
+                        ui.label(RichText::new(&snapshot.notice).small().color(
+                            if self.preferences.dark {
+                                Color32::from_rgb(207, 134, 64)
+                            } else {
+                                Color32::from_rgb(154, 91, 27)
+                            },
+                        ));
                         if ui.small_button("×").clicked() {
                             self.backend.clear_notice();
                         }
@@ -1011,11 +1245,13 @@ impl eframe::App for Drawer {
                         .iter()
                         .filter(|d| d.status == DeviceStatus::Online)
                         .count();
-                    ui.label(
-                        RichText::new(format!("● {online} 台在线"))
-                            .small()
-                            .color(if online > 0 { GREEN } else { MUTED }),
-                    );
+                    ui.label(RichText::new(format!("● {online} 台在线")).small().color(
+                        if online > 0 {
+                            positive_text(ui)
+                        } else {
+                            secondary_text(ui)
+                        },
+                    ));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.add(egui::Button::new("设置").frame(false)).clicked() {
                             self.dialog = Some(Dialog::Settings);
@@ -1042,8 +1278,8 @@ fn connect_dialog() -> Dialog {
 }
 fn primary_button(text: &str) -> egui::Button<'_> {
     egui::Button::new(RichText::new(text).color(Color32::WHITE))
-        .fill(GREEN)
-        .min_size(Vec2::new(128., 34.))
+        .fill(PRIMARY_GREEN)
+        .min_size(Vec2::new(128., 40.))
 }
 fn modal_heading(ui: &mut egui::Ui, title: &str, close: &mut bool) {
     ui.horizontal(|ui| {
@@ -1056,13 +1292,31 @@ fn modal_heading(ui: &mut egui::Ui, title: &str, close: &mut bool) {
     });
     ui.add_space(8.);
 }
-fn field(ui: &mut egui::Ui, label: &str, value: &mut String, password: bool) {
-    ui.label(RichText::new(label).small().color(MUTED));
-    ui.add(
+fn field(ui: &mut egui::Ui, label: &str, value: &mut String, password: bool, hint: &str) {
+    let label = ui.label(RichText::new(label).strong());
+    ui.add_sized(
+        [ui.available_width(), 38.],
         egui::TextEdit::singleline(value)
             .password(password)
+            .hint_text(hint)
+            .margin(Vec2::new(10., 9.))
             .desired_width(f32::INFINITY),
-    );
+    )
+    .labelled_by(label.id);
+}
+fn secondary_text(ui: &egui::Ui) -> Color32 {
+    if ui.visuals().dark_mode {
+        Color32::from_rgb(163, 175, 187)
+    } else {
+        Color32::from_rgb(99, 111, 123)
+    }
+}
+fn positive_text(ui: &egui::Ui) -> Color32 {
+    if ui.visuals().dark_mode {
+        GREEN
+    } else {
+        PRIMARY_GREEN
+    }
 }
 fn card(ui: &mut egui::Ui, dark: bool, content: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
