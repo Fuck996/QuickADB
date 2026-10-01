@@ -59,3 +59,17 @@
 - 真机验收仍需用户更新后在上述两台 Android 手机上复验无线配对、持续连接、批量安装和实际安装结果。本次没有通过本地协议夹具宣称这两台手机已修复或安装通过。
 
 官方依据：[ADB Wi-Fi 架构](https://android.googlesource.com/platform/packages/modules/adb/+/HEAD/docs/dev/adb_wifi.md)、[adbd 的 mDNS 服务注册](https://android.googlesource.com/platform/packages/modules/adb/+/HEAD/daemon/mdns.cpp)。
+
+## 0.1.3 APK 准备与显式安装
+
+- 选择、上传和拖入 APK 统一进入准备状态，检查文件后才允许点击安装。没有新增“上次 APK”历史功能。提交使用原有安装队列，在点击时绑定选中的在线设备，同设备串行、不同设备并行；重试仍使用原任务目标。
+- 应用测试共 15 项通过（安装 8 项、队列/存储/连接 7 项）。新增验证包括准备期间零任务、零传输，无目标设备时保留准备内容，重复点击同一准备版本不重复提交，普通批量与拆分组检查，替换/清空后的旧版本不能提交，以及准备后文件被修改时明确失败而不传输新内容。安装协议未更改，沿用 0.1.0 的配对协议验证记录。
+- 文件事件在 `raw_input_hook` 中消费，折叠状态也能接收；拖放悬停或鼠标按下期间延后失焦隐藏。文件选择按钮只记录选择请求，在输入阶段打开系统选择框，避免 UI 多轮布局重复触发阻塞对话框。
+- 窗口夹具直接包含正式 `src/native/ui.rs`，使用正式后端、真实 APK 文件和两台本机协议服务。以合成的 egui 文件事件从 440 × 64 折叠窗口展开到 440 × 660，记录 `Ready=true;Jobs=0;Expanded=true`；随后通过实际窗口按钮选择两台设备并点击安装，两台各收到一份 APK，逐字节一致。该夹具没有绕过准备状态或安装队列，也没有预填假任务，但合成输入不等于资源管理器原生拖放。
+- 最终窗口检查中文长文件名、准备状态、禁用安装按钮、显式安装成功、原始连接检查提示和底部入口；顶部内容超出空间时局部滚动，任务区独立滚动。底部提示按实际高度预留，滚动区不再受到默认最小高度影响。最终截图为 `logs/preparation-0.1.3-final.png` 与 `logs/install-tasks-0.1.3-final.png`。
+- 用户看到的任务栏白色图标来自验收夹具遗漏窗口图标设置；已关闭该窗口并修正夹具。正式应用的 EXE、窗口、标题继续共用原 AppIcon，安装箭头只用于托盘；本次没有重新绘制第三套任务栏图标。
+- 原生应用 Clippy 严格检查与格式检查通过。此前打包后发现的任务区布局问题使旧构建失效，修正后重新构建最终 Release。
+- 资源管理器 OLE 拖放和系统选择框的实际文件输入未通过本机自动验收：当前自动化通道不能稳定读取/操作输入桌面，UIAutomation 文本输入也未改变原生选择结果。未将这些失败算作通过；文件输入处理与准备/提交链路通过上述窗口夹具和应用测试验证，资源管理器实拖与系统选择文件仍需在正常桌面会话复验。
+- 真机缺口继续保留：USB 授权、手机无线配对、持续连接和签名 APK 实际安装未在当前机器验证。
+
+官方依据：[eframe App 输入与逻辑生命周期](https://docs.rs/eframe/0.36.2/eframe/trait.App.html)、[egui 窗口拖放配置](https://docs.rs/egui/0.36.2/egui/viewport/struct.ViewportBuilder.html)、[Windows OLE RegisterDragDrop](https://learn.microsoft.com/en-us/windows/win32/api/ole2/nf-ole2-registerdragdrop)、[GetAsyncKeyState 按键状态位](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getasynckeystate)。

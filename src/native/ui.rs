@@ -125,6 +125,7 @@ struct Drawer {
     exiting: bool,
     was_focused: bool,
     drag_hovering: bool,
+    file_picker: Option<bool>,
     opened: Instant,
     last_position: Option<[f32; 2]>,
     position_changed: Instant,
@@ -184,6 +185,7 @@ impl Drawer {
             exiting: false,
             was_focused: false,
             drag_hovering: false,
+            file_picker: None,
             opened: Instant::now(),
             last_position: None,
             position_changed: Instant::now(),
@@ -569,6 +571,7 @@ impl Drawer {
                     egui::ScrollArea::vertical()
                         .id_salt("prepared-apks")
                         .max_height(88.)
+                        .min_scrolled_height(0.)
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
                             for (index, path) in preparation.paths.iter().enumerate() {
@@ -695,18 +698,21 @@ impl Drawer {
                         )
                         .clicked()
                     {
-                        self.pick_apks(false);
-                        self.opened = Instant::now();
+                        self.file_picker = Some(false);
+                        columns[0].ctx().request_repaint();
                     }
                     let second_width = columns[1].available_width();
                     if columns[1]
                         .add_sized([second_width, 34.], egui::Button::new("选择拆分 APK"))
                         .clicked()
                     {
-                        self.pick_apks(true);
-                        self.opened = Instant::now();
+                        self.file_picker = Some(true);
+                        columns[1].ctx().request_repaint();
                     }
                 });
+                if snapshot.preparation.is_none() {
+                    return;
+                }
                 ui.add_space(8.);
                 let ready = snapshot
                     .preparation
@@ -729,6 +735,58 @@ impl Drawer {
                     self.opened = Instant::now();
                 }
             });
+    }
+
+    fn footer(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) {
+        if !snapshot.notice.is_empty() {
+            ui.horizontal(|ui| {
+                let width = (ui.available_width() - 32.).max(1.);
+                egui::ScrollArea::vertical()
+                    .id_salt("notice")
+                    .max_height(52.)
+                    .min_scrolled_height(0.)
+                    .max_width(width)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&snapshot.notice)
+                                    .small()
+                                    .color(ui.visuals().warn_fg_color),
+                            )
+                            .wrap(),
+                        );
+                    });
+                if ui.small_button("×").on_hover_text("关闭提示").clicked() {
+                    self.backend.clear_notice();
+                }
+            });
+        }
+        ui.separator();
+        ui.horizontal(|ui| {
+            let online = snapshot
+                .devices
+                .iter()
+                .filter(|d| d.status == DeviceStatus::Online)
+                .count();
+            ui.label(
+                RichText::new(format!("● {online} 台在线"))
+                    .small()
+                    .color(if online > 0 {
+                        positive_text(ui)
+                    } else {
+                        secondary_text(ui)
+                    }),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(egui::Button::new("设置").frame(false)).clicked() {
+                    self.dialog = Some(Dialog::Settings);
+                }
+                if ui.add(egui::Button::new("设备管理").frame(false)).clicked() {
+                    self.dialog = Some(Dialog::Devices);
+                }
+            });
+        });
     }
 
     fn job_row(&mut self, ui: &mut egui::Ui, job: &Job) {
@@ -1252,6 +1310,11 @@ impl Drawer {
 
 impl eframe::App for Drawer {
     fn raw_input_hook(&mut self, ctx: &egui::Context, input: &mut egui::RawInput) {
+        if let Some(split) = self.file_picker.take() {
+            self.pick_apks(split);
+            self.opened = Instant::now();
+            self.was_focused = false;
+        }
         self.drag_hovering = !input.hovered_files.is_empty();
         if self.drag_hovering {
             self.opened = Instant::now();
@@ -1394,13 +1457,24 @@ impl eframe::App for Drawer {
             .fill(ui.visuals().panel_fill)
             .inner_margin(16)
             .show(ui, |ui| {
+                egui::Panel::bottom("drawer-footer")
+                    .frame(egui::Frame::NONE)
+                    .show(ui, |ui| self.footer(ui, &snapshot));
                 self.header(ui);
                 ui.add_space(7.);
                 ui.separator();
                 ui.add_space(5.);
-                self.device_rows(ui, &snapshot);
-                ui.add_space(6.);
-                self.drop_zone(ui, &snapshot);
+                let task_height = if snapshot.jobs.is_empty() { 56. } else { 132. };
+                egui::ScrollArea::vertical()
+                    .id_salt("drawer-preparation")
+                    .max_height((ui.available_height() - task_height).max(0.))
+                    .min_scrolled_height(0.)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        self.device_rows(ui, &snapshot);
+                        ui.add_space(6.);
+                        self.drop_zone(ui, &snapshot);
+                    });
                 ui.add_space(6.);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("安装任务").strong());
@@ -1421,16 +1495,16 @@ impl eframe::App for Drawer {
                         }
                     });
                 });
-                let remaining = (ui.available_height()
-                    - if snapshot.notice.is_empty() { 37. } else { 90. })
-                .max(60.);
+                let remaining = ui.available_height().max(0.);
                 egui::ScrollArea::vertical()
                     .id_salt("jobs")
                     .max_height(remaining)
+                    .min_scrolled_height(0.)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         if snapshot.jobs.is_empty() {
-                            ui.add_space(18.);
+                            let text_height = ui.text_style_height(&egui::TextStyle::Small);
+                            ui.add_space(((remaining - text_height) / 2.).max(0.));
                             ui.vertical_centered(|ui| {
                                 ui.label(
                                     RichText::new("安装结果会显示在这里")
@@ -1443,43 +1517,6 @@ impl eframe::App for Drawer {
                             self.job_row(ui, job);
                         }
                     });
-                if !snapshot.notice.is_empty() {
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(&snapshot.notice).small().color(
-                            if self.preferences.dark {
-                                Color32::from_rgb(207, 134, 64)
-                            } else {
-                                Color32::from_rgb(154, 91, 27)
-                            },
-                        ));
-                        if ui.small_button("×").clicked() {
-                            self.backend.clear_notice();
-                        }
-                    });
-                }
-                ui.separator();
-                ui.horizontal(|ui| {
-                    let online = snapshot
-                        .devices
-                        .iter()
-                        .filter(|d| d.status == DeviceStatus::Online)
-                        .count();
-                    ui.label(RichText::new(format!("● {online} 台在线")).small().color(
-                        if online > 0 {
-                            positive_text(ui)
-                        } else {
-                            secondary_text(ui)
-                        },
-                    ));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(egui::Button::new("设置").frame(false)).clicked() {
-                            self.dialog = Some(Dialog::Settings);
-                        }
-                        if ui.add(egui::Button::new("设备管理").frame(false)).clicked() {
-                            self.dialog = Some(Dialog::Devices);
-                        }
-                    });
-                });
             });
         self.dialogs(&ctx, &snapshot);
     }
