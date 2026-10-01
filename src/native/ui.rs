@@ -1,3 +1,4 @@
+use droidmux::discovery::AdbServiceType;
 use eframe::egui::{self, Color32, FontId, RichText, Stroke, Vec2, ViewportCommand, WindowLevel};
 use quickadb::{
     engine::Backend,
@@ -10,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tray_icon::{
-    Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
+    MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
     menu::{Menu, MenuEvent, MenuItem},
 };
 
@@ -21,7 +22,7 @@ const PRIMARY_GREEN: Color32 = Color32::from_rgb(20, 133, 84);
 
 pub fn run(storage: Arc<Storage>, backend: Backend) -> eframe::Result {
     let settings = storage.settings();
-    let icon = image::load_from_memory(include_bytes!("../../assets/AppIcon.png"))
+    let icon = image::load_from_memory(include_bytes!("../../assets/AppIconDisplay.png"))
         .expect("embedded icon invalid")
         .into_rgba8();
     let data = egui::IconData {
@@ -135,10 +136,8 @@ impl Drawer {
         backend: Backend,
     ) -> anyhow::Result<Self> {
         let preferences = storage.settings();
-        let pixels =
-            image::load_from_memory(include_bytes!("../../assets/AppIcon.png"))?.into_rgba8();
-        let tray_pixels =
-            image::imageops::resize(&pixels, 32, 32, image::imageops::FilterType::Lanczos3);
+        let pixels = image::load_from_memory(include_bytes!("../../assets/AppIconDisplay.png"))?
+            .into_rgba8();
         let menu = Menu::new();
         let open_menu = MenuItem::new("打开安装抽屉", true, None);
         let settings_menu = MenuItem::new("设置", true, None);
@@ -150,7 +149,7 @@ impl Drawer {
             &exit_menu,
         ])?;
         let tray = TrayIconBuilder::new()
-            .with_icon(Icon::from_rgba(tray_pixels.as_raw().clone(), 32, 32)?)
+            .with_icon(platform::tray_icon()?)
             .with_tooltip("QuickADB · 点击安装 APK")
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(false)
@@ -356,11 +355,7 @@ impl Drawer {
                     ui.ctx()
                         .send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(WIDTH, 64.)));
                 }
-                if ui
-                    .selectable_label(self.preferences.pinned, "固定")
-                    .on_hover_text("固定后点击其他窗口时保持展开")
-                    .clicked()
-                {
+                if pin_button(ui, self.preferences.pinned).clicked() {
                     self.preferences.pinned = !self.preferences.pinned;
                     self.persist();
                 }
@@ -775,10 +770,15 @@ impl Drawer {
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 if *mode == 0 {
-                    ui.label(RichText::new("在手机上准备配对").strong());
+                    ui.label(RichText::new("先在手机上打开配对码弹窗").strong());
                     ui.label(RichText::new("开发者选项 → 无线调试 → 使用配对码配对设备").size(13.));
                     ui.label(
                         RichText::new("适用于 Android 11 及以上；请保持配对弹窗打开。")
+                            .small()
+                            .color(secondary_text(ui)),
+                    );
+                    ui.label(
+                        RichText::new("此弹窗由手机操作打开，电脑不能远程触发。")
                             .small()
                             .color(secondary_text(ui)),
                     );
@@ -873,16 +873,56 @@ impl Drawer {
                     .color(secondary_text(ui)),
             );
         }
-        if !snapshot.discovered.is_empty() {
-            egui::CollapsingHeader::new("发现的无线连接地址").show(ui, |ui| {
-                egui::ScrollArea::vertical().max_height(70.).show(ui, |ui| {
-                    for endpoint in &snapshot.discovered {
-                        if ui
-                            .button(format!("{}:{}", endpoint.host, endpoint.port))
-                            .clicked()
-                        {
+        let discovered: Vec<_> = snapshot
+            .discovered
+            .iter()
+            .filter(|device| match *mode {
+                0 => device.service_type != AdbServiceType::Legacy,
+                1 => device.service_type == AdbServiceType::TlsConnect,
+                _ => device.service_type == AdbServiceType::Legacy,
+            })
+            .collect();
+        if !discovered.is_empty() {
+            egui::CollapsingHeader::new("局域网发现的设备").show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height(128.).show(ui, |ui| {
+                    for device in discovered {
+                        let endpoint = &device.endpoint;
+                        let known_name = snapshot.devices.iter().find_map(|known| {
+                            known.endpoint.as_ref().filter(|address| address.host == endpoint.host && address.port == endpoint.port).map(|_| known.name.as_str())
+                        });
+                        let name = known_name.unwrap_or(&device.name);
+                        let kind = match device.service_type {
+                            AdbServiceType::Pairing => "配对服务 · 填入配对端口",
+                            AdbServiceType::TlsConnect => "无线连接 · 填入连接端口",
+                            AdbServiceType::Legacy => "传统 TCP · 填入连接端口",
+                        };
+                        let response = egui::Frame::new()
+                            .fill(ui.visuals().widgets.inactive.bg_fill)
+                            .corner_radius(8)
+                            .inner_margin(10)
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.add(egui::Label::new(RichText::new(name).strong()).truncate());
+                                ui.label(RichText::new(format!("{}:{} · {kind}", endpoint.host, endpoint.port)).small().color(secondary_text(ui)));
+                            }).response.interact(egui::Sense::click());
+                        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), format!("填入{name} · {kind}")));
+                        let response = response.on_hover_text(if device.model_advertised || known_name.is_some() {
+                            device.fullname.as_str()
+                        } else {
+                            "设备没有广播型号，当前显示其真实服务名称。连接授权后可读取型号并设置备注。"
+                        });
+                        if response.clicked() {
+                            if *host != endpoint.host {
+                                pairing_port.clear();
+                                port.clear();
+                                code.clear();
+                            }
                             *host = endpoint.host.clone();
-                            *port = endpoint.port.to_string();
+                            if device.service_type == AdbServiceType::Pairing {
+                                *pairing_port = endpoint.port.to_string();
+                            } else {
+                                *port = endpoint.port.to_string();
+                            }
                         }
                     }
                 });
@@ -943,8 +983,15 @@ impl Drawer {
             return;
         };
         let mut close = false;
+        let dialog_height = (ctx.content_rect().height() - 64.).max(120.);
         let response = egui::Modal::new(egui::Id::new("drawer-dialog")).frame(egui::Frame::popup(&ctx.global_style()).corner_radius(14).inner_margin(16)).show(ctx, |ui| {
             ui.set_width(368.);
+            egui::ScrollArea::vertical()
+                .id_salt("dialog-content")
+                .max_height(dialog_height)
+                .min_scrolled_height(dialog_height)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
             match &mut dialog {
                 Dialog::Connect { .. } => self.connection_form(ui, snapshot, &mut dialog, &mut close),
                 Dialog::Settings => {
@@ -1034,6 +1081,7 @@ impl Drawer {
                     });
                 }
             }
+            });
         });
         if !close && !response.should_close() {
             self.dialog = Some(dialog);
@@ -1281,6 +1329,49 @@ fn primary_button(text: &str) -> egui::Button<'_> {
         .fill(PRIMARY_GREEN)
         .min_size(Vec2::new(128., 40.))
 }
+fn pin_button(ui: &mut egui::Ui, pinned: bool) -> egui::Response {
+    let label = if pinned {
+        "取消固定"
+    } else {
+        "固定抽屉"
+    };
+    let response = ui.add_sized([32., 32.], egui::Button::new("").selected(pinned));
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), pinned, label)
+    });
+    let color = if pinned {
+        positive_text(ui)
+    } else {
+        ui.visuals().text_color()
+    };
+    let origin = response.rect.center() - Vec2::splat(10.);
+    let shape = [
+        (6., 3.),
+        (14., 3.),
+        (13., 10.),
+        (16., 13.),
+        (4., 13.),
+        (7., 10.),
+    ]
+    .into_iter()
+    .map(|(x, y)| origin + Vec2::new(x, y))
+    .collect();
+    ui.painter().add(egui::epaint::PathShape {
+        points: shape,
+        closed: true,
+        fill: if pinned { color } else { Color32::TRANSPARENT },
+        stroke: Stroke::new(1.5, color).into(),
+    });
+    ui.painter().line_segment(
+        [origin + Vec2::new(10., 13.), origin + Vec2::new(10., 19.)],
+        Stroke::new(1.5, color),
+    );
+    response.on_hover_text(if pinned {
+        "取消固定，点击外部时自动收起"
+    } else {
+        "固定抽屉，点击外部时保持展开"
+    })
+}
 fn modal_heading(ui: &mut egui::Ui, title: &str, close: &mut bool) {
     ui.horizontal(|ui| {
         ui.heading(title);
@@ -1300,6 +1391,11 @@ fn field(ui: &mut egui::Ui, label: &str, value: &mut String, password: bool, hin
             .password(password)
             .hint_text(hint)
             .margin(Vec2::new(10., 9.))
+            .background_color(if ui.visuals().dark_mode {
+                Color32::from_rgb(24, 29, 34)
+            } else {
+                Color32::from_rgb(247, 249, 250)
+            })
             .desired_width(f32::INFINITY),
     )
     .labelled_by(label.id);

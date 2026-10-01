@@ -124,8 +124,17 @@ pub struct Job {
 pub struct Snapshot {
     pub devices: Vec<Device>,
     pub jobs: Vec<Job>,
-    pub discovered: Vec<Endpoint>,
+    pub discovered: Vec<DiscoveredDevice>,
     pub notice: String,
     pub connecting: bool,
     pub pairing: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct DiscoveredDevice {
+    pub fullname: String,
+    pub name: String,
+    pub model_advertised: bool,
+    pub service_type: droidmux::discovery::AdbServiceType,
+    pub endpoint: Endpoint,
 }

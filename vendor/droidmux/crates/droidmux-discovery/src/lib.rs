@@ -18,10 +18,37 @@ use thiserror::Error;
 /// mDNS service advertised by Android wireless debugging for ADB connections.
 pub const ADB_TLS_CONNECT_SERVICE: &str = "_adb-tls-connect._tcp.local.";
 
+/// Pairing service published while the phone's pairing dialog is open.
+pub const ADB_TLS_PAIRING_SERVICE: &str = "_adb-tls-pairing._tcp.local.";
+
 /// Legacy mDNS service advertised by adbd TCP endpoints.
 pub const ADB_LEGACY_SERVICE: &str = "_adb._tcp.local.";
 
-const ADB_SERVICES: [&str; 2] = [ADB_TLS_CONNECT_SERVICE, ADB_LEGACY_SERVICE];
+const ADB_SERVICES: [&str; 3] = [
+    ADB_TLS_CONNECT_SERVICE,
+    ADB_TLS_PAIRING_SERVICE,
+    ADB_LEGACY_SERVICE,
+];
+
+/// Protocol advertised by a wireless debugging service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdbServiceType {
+    /// TLS debugging connection, requiring an existing pairing credential.
+    TlsConnect,
+    /// Pairing server accepting the code shown on the phone.
+    Pairing,
+    /// Traditional ADB TCP connection.
+    Legacy,
+}
+
+/// Discovery changes, including services withdrawn by the device.
+#[derive(Debug, Clone)]
+pub enum AdbMdnsEvent {
+    /// Service resolved or its advertised metadata changed.
+    Resolved(AdbMdnsDevice),
+    /// Fully qualified name of a withdrawn service.
+    Removed(String),
+}
 
 /// Errors returned by mDNS discovery.
 #[derive(Debug, Error)]
@@ -41,6 +68,12 @@ pub enum MdnsDiscoveryError {
 pub struct AdbMdnsDevice {
     /// Fully qualified mDNS service name.
     pub fullname: String,
+    /// Service instance name, distinct from the phone's product model.
+    pub instance_name: String,
+    /// Product model from Android's `name` TXT property, when advertised.
+    pub model: Option<String>,
+    /// Connection or pairing protocol advertised by this service.
+    pub service_type: AdbServiceType,
     /// Resolved addresses for the service.
     addresses: BTreeSet<IpAddr>,
     /// TCP port advertised by the service.
@@ -53,8 +86,26 @@ impl AdbMdnsDevice {
         if port == 0 {
             return None;
         }
+        let service_type = match service.ty_domain.as_str() {
+            ADB_TLS_CONNECT_SERVICE => AdbServiceType::TlsConnect,
+            ADB_TLS_PAIRING_SERVICE => AdbServiceType::Pairing,
+            ADB_LEGACY_SERVICE => AdbServiceType::Legacy,
+            _ => return None,
+        };
+        let instance_name = service
+            .fullname
+            .strip_suffix(&format!(".{}", service.ty_domain))?
+            .to_owned();
+        let model = service
+            .get_property_val_str("name")
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned);
         Some(Self {
             fullname: service.fullname,
+            instance_name,
+            model,
+            service_type,
             addresses: service.addresses.iter().map(ScopedIp::to_ip_addr).collect(),
             port,
         })
@@ -123,7 +174,7 @@ impl MdnsDiscovery {
     ///
     /// Returns an error when the service browser or forwarding worker cannot
     /// be started.
-    pub fn browse(&self) -> Result<StdReceiver<AdbMdnsDevice>, MdnsDiscoveryError> {
+    pub fn browse(&self) -> Result<StdReceiver<AdbMdnsEvent>, MdnsDiscoveryError> {
         let events = ADB_SERVICES
             .iter()
             .map(|service| self.daemon.browse(service))
@@ -159,8 +210,11 @@ impl MdnsDiscovery {
                     break;
                 }
                 match receiver.recv_timeout(remaining) {
-                    Ok(device) => {
+                    Ok(AdbMdnsEvent::Resolved(device)) => {
                         devices.insert(device.fullname.clone(), device);
+                    }
+                    Ok(AdbMdnsEvent::Removed(fullname)) => {
+                        devices.remove(&fullname);
                     }
                     Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => {
                         break;
@@ -192,11 +246,17 @@ impl Drop for MdnsDiscovery {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn forward_resolved_events(events: MdnsReceiver<ServiceEvent>, sender: Sender<AdbMdnsDevice>) {
+fn forward_resolved_events(events: MdnsReceiver<ServiceEvent>, sender: Sender<AdbMdnsEvent>) {
     while let Ok(event) = events.recv() {
-        if let ServiceEvent::ServiceResolved(service) = event
-            && let Some(device) = AdbMdnsDevice::from_service(*service)
-            && sender.send(device).is_err()
+        let change = match event {
+            ServiceEvent::ServiceResolved(service) => {
+                AdbMdnsDevice::from_service(*service).map(AdbMdnsEvent::Resolved)
+            }
+            ServiceEvent::ServiceRemoved(_, fullname) => Some(AdbMdnsEvent::Removed(fullname)),
+            _ => None,
+        };
+        if let Some(change) = change
+            && sender.send(change).is_err()
         {
             break;
         }
@@ -211,6 +271,9 @@ mod tests {
     fn separates_resolved_address_families() {
         let device = AdbMdnsDevice {
             fullname: "adb-test._adb-tls-connect._tcp.local.".to_owned(),
+            instance_name: "adb-test".to_owned(),
+            model: None,
+            service_type: AdbServiceType::TlsConnect,
             addresses: [
                 IpAddr::V4(Ipv4Addr::LOCALHOST),
                 IpAddr::V6(Ipv6Addr::LOCALHOST),
@@ -233,6 +296,45 @@ mod tests {
     #[test]
     fn uses_android_wireless_debugging_service_name() {
         assert_eq!(ADB_TLS_CONNECT_SERVICE, "_adb-tls-connect._tcp.local.");
+        assert_eq!(ADB_TLS_PAIRING_SERVICE, "_adb-tls-pairing._tcp.local.");
         assert_eq!(ADB_LEGACY_SERVICE, "_adb._tcp.local.");
+    }
+
+    #[test]
+    fn resolved_service_preserves_product_model_and_pairing_port() {
+        let service = mdns_sd::ServiceInfo::new(
+            ADB_TLS_PAIRING_SERVICE,
+            "adb-test-pair",
+            "android.local.",
+            "192.168.1.8",
+            37_002,
+            [("name", "Pixel 8"), ("v", "1")].as_slice(),
+        )
+        .expect("pairing advertisement")
+        .as_resolved_service();
+        let device = AdbMdnsDevice::from_service(service).expect("resolved pairing service");
+        assert_eq!(device.model.as_deref(), Some("Pixel 8"));
+        assert_eq!(device.instance_name, "adb-test-pair");
+        assert_eq!(device.service_type, AdbServiceType::Pairing);
+        assert_eq!(device.port, 37_002);
+    }
+
+    #[test]
+    fn service_instance_is_retained_without_a_product_model() {
+        let service = mdns_sd::ServiceInfo::new(
+            ADB_TLS_CONNECT_SERVICE,
+            "adb-test-connect",
+            "android.local.",
+            "192.168.1.8",
+            37_003,
+            [("v", "1")].as_slice(),
+        )
+        .expect("connection advertisement")
+        .as_resolved_service();
+        let device = AdbMdnsDevice::from_service(service).expect("resolved connection service");
+        assert_eq!(device.model, None);
+        assert_eq!(device.instance_name, "adb-test-connect");
+        assert_eq!(device.service_type, AdbServiceType::TlsConnect);
+        assert_eq!(device.port, 37_003);
     }
 }

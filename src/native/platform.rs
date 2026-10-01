@@ -4,17 +4,38 @@ use windows_sys::Win32::{
     Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, RECT},
     Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint},
     System::{
+        LibraryLoader::GetModuleHandleW,
         Registry::{
             HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegCreateKeyExW,
             RegDeleteValueW, RegSetValueExW,
         },
         Threading::CreateMutexW,
     },
-    UI::WindowsAndMessaging::{
-        FindWindowW, GetCursorPos, MB_ICONERROR, MB_OK, MessageBoxW, SW_SHOW, SetForegroundWindow,
-        ShowWindow,
+    UI::{
+        Controls::{LIM_SMALL, LoadIconMetric},
+        WindowsAndMessaging::{
+            FindWindowW, GetCursorPos, MB_ICONERROR, MB_OK, MessageBoxW, SW_SHOW,
+            SetForegroundWindow, ShowWindow,
+        },
     },
 };
+
+pub fn tray_icon() -> Result<tray_icon::Icon> {
+    let mut icon = ptr::null_mut();
+    let result = unsafe {
+        LoadIconMetric(
+            GetModuleHandleW(ptr::null()),
+            2usize as _,
+            LIM_SMALL,
+            &mut icon,
+        )
+    };
+    ensure!(
+        result >= 0 && !icon.is_null(),
+        "托盘图标资源加载失败：HRESULT {result:#x}"
+    );
+    Ok(tray_icon::Icon::from_handle(icon as isize))
+}
 
 pub fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()

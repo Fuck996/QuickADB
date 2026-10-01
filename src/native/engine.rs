@@ -705,7 +705,18 @@ impl Engine {
                 Err(error) => self.notice(&format!("USB 枚举任务失败：{error}")),
             }
             if let Some((_, receiver)) = &discovery {
-                while let Ok(device) = receiver.try_recv() {
+                while let Ok(event) = receiver.try_recv() {
+                    let device = match event {
+                        droidmux::discovery::AdbMdnsEvent::Resolved(device) => device,
+                        droidmux::discovery::AdbMdnsEvent::Removed(fullname) => {
+                            self.state
+                                .lock()
+                                .expect("state lock poisoned")
+                                .discovered
+                                .retain(|device| device.fullname != fullname);
+                            continue;
+                        }
+                    };
                     let addresses = device.ipv4_addresses();
                     if let Some(address) = addresses.first() {
                         let endpoint = Endpoint {
@@ -713,13 +724,24 @@ impl Engine {
                             port: device.port,
                             paired_id: None,
                         };
+                        let discovered = DiscoveredDevice {
+                            fullname: device.fullname,
+                            model_advertised: device.model.is_some(),
+                            name: device
+                                .model
+                                .unwrap_or_else(|| format!("服务：{}", device.instance_name)),
+                            service_type: device.service_type,
+                            endpoint,
+                        };
                         let mut state = self.state.lock().expect("state lock poisoned");
-                        if !state
+                        if let Some(existing) = state
                             .discovered
-                            .iter()
-                            .any(|e| e.host == endpoint.host && e.port == endpoint.port)
+                            .iter_mut()
+                            .find(|entry| entry.fullname == discovered.fullname)
                         {
-                            state.discovered.push(endpoint);
+                            *existing = discovered;
+                        } else {
+                            state.discovered.push(discovered);
                         }
                     }
                 }
