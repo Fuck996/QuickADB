@@ -33,3 +33,9 @@ Windows x64，PowerShell 7，Rust 1.95+，Visual Studio 2022 C++ Build Tools 与
 完成测试、窗口验证和依赖检查后，用 `scripts/Publish.ps1` 生成带版本号的本地产物，并将同版本 EXE 复制到 `U:\开发工作`，校验 SHA-256。输出目录、缓存、日志和授权文件不提交 Git。
 
 当前版本的验证记录见 [docs/verification.md](docs/verification.md)。协议夹具通过不代表真实手机通过；USB 授权、手机无线配对、签名 APK 的真实安装和机型驱动兼容性仍需真机验收。
+
+## Windows 发布者提示
+
+当前测试版 EXE 未进行 Authenticode 代码签名。下载后出现“Windows 已保护你的电脑 / 无法识别的应用”可能是 SmartScreen 对未知发布者和文件信誉的提示，不能据此判断缺少运行依赖。更改版本号、图标或应用清单不能建立发布者信誉。
+
+正式发行需要可信代码签名证书或经过身份验证的签名服务；签名也不保证新文件立即免除 SmartScreen 提示。微软说明自签名证书不能解决这种提示，见 [SmartScreen 应用信誉说明](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation)。发布脚本核对 EXE 内部版本，输出实际签名状态与副本 SHA-256，不把未签名文件标记为已认证发布者。

@@ -34,6 +34,11 @@ foreach ($library in $dependencies) {
 $cargo = [System.IO.File]::ReadAllText((Join-Path $projectRoot 'Cargo.toml'))
 if ($cargo -notmatch '(?m)^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"') { throw '无法读取应用版本。' }
 $version = $Matches[1]
+$versionInfo = (Get-Item -LiteralPath $executable).VersionInfo
+if ($versionInfo.FileVersion -ne $version -or $versionInfo.ProductVersion -ne $version) {
+    throw "EXE 版本与项目版本 $version 不一致，请重新构建 Release。"
+}
+$signature = Get-AuthenticodeSignature -FilePath $executable
 $fileName = "QuickADB-$version-x64.exe"
 $artifacts = Join-Path $projectRoot 'artifacts'
 New-Item -ItemType Directory -Force -Path $artifacts | Out-Null
@@ -57,5 +62,7 @@ Copy-VerifiedExecutable $shared
     Shared = $shared
     SHA256 = $hash
     Bytes = (Get-Item -LiteralPath $local).Length
+    SignatureStatus = $signature.Status.ToString()
+    Publisher = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { $null }
     SystemDependencies = $dependencies
 } | ConvertTo-Json -Depth 3

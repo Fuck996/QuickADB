@@ -1,6 +1,6 @@
 [package]
 name = "quickadb"
-version = "0.1.3"
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.95"
 description = "常驻托盘的 Android APK 安装抽屉"

@@ -75,3 +75,14 @@
 - 真机缺口继续保留：USB 授权、手机无线配对、持续连接和签名 APK 实际安装未在当前机器验证。
 
 官方依据：[eframe App 输入与逻辑生命周期](https://docs.rs/eframe/0.36.2/eframe/trait.App.html)、[egui 窗口拖放配置](https://docs.rs/egui/0.36.2/egui/viewport/struct.ViewportBuilder.html)、[Windows OLE RegisterDragDrop](https://learn.microsoft.com/en-us/windows/win32/api/ole2/nf-ole2-registerdragdrop)、[GetAsyncKeyState 按键状态位](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getasynckeystate)。
+
+## 0.9.0 版本与 Windows 发布者提示
+
+- 用户确认提示为“Windows 已保护你的电脑 / 无法识别的应用”。旧版 EXE 的 Authenticode 状态为 `NotSigned`，当前用户及本机个人证书存储均没有代码签名证书。本地文件未带 Internet Zone.Identifier 标记，本机直接启动正常不能替代下载后的 SmartScreen 信誉验收。
+- 微软官方将 SmartScreen 判断定义为发布者信誉与文件哈希信誉。未签名更新需要重新积累文件信誉，改版本号不能消除提示；自签名证书也不等于可信发布者。即使使用可信签名，新应用仍可能提示。此次没有关闭 Windows 防护、删除下载标记或安装自签名根证书来规避检查，也没有声称 SmartScreen 提示已修复。
+- 按用户要求将 Cargo 包版本、锁文件中的应用版本及 Windows 清单统一为 0.9.0。发布脚本增加 EXE 文件版本和产品版本一致性检查，并输出实际签名状态和发布者信息。
+- 修改范围为版本资源、发布核验与说明文档，应用业务代码和依赖未更改，沿用 0.1.3 已通过的 15 项应用测试和窗口行为验证；PowerShell 发布脚本语法解析、清单 XML 解析与 diff 检查通过。
+- 最终 Release 构建通过，EXE 文件版本和产品版本均为 0.9.0。隔离目录启动最终 EXE，两台协议设备在线且底部入口可访问；通过正式退出菜单结束，退出码为 0，未传输安装包。
+- `QuickADB-0.9.0-x64.exe` 为 15,426,560 字节，导入表仅含 21 个 Windows 系统依赖，实际签名状态仍为 `NotSigned`、发布者为空。项目 artifacts 与 `U:\开发工作` 副本 SHA-256 均为 `C03E8907B7679716A91B5B160DA57CACD69B9C214B3A2534F927C4A4C75328ED`。未进行下载后 SmartScreen 提示消失验收，0.1.3 的原生文件输入和真机验收缺口保持不变。
+
+官方依据：[微软 SmartScreen 应用信誉说明](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation)。正式发布若需可验证发布者，应使用可信代码签名证书或经身份验证的签名服务；当前尚无可用签名身份。
