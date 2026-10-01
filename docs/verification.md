@@ -107,5 +107,6 @@
 - 设置页通过实际 UIAutomation 开关验收，等待应用处理 UI 帧后，取消固定时持久化 `pinned=false, topmost=false` 且系统置顶标志为假；重新固定后标志为真。固定时“窗口保持置顶”控件状态为勾选、禁用。两个验收实例均从正式托盘菜单正常退出，退出码为 0，APK 上传数为零。
 - 原生应用 Clippy 严格检查、格式检查、diff 检查及最终 Release 构建通过，EXE 文件版本与产品版本均为 0.9.2。后台连接、安装及依赖未改动，沿用 0.1.3 的 15 项应用测试记录；既有原生文件输入和真机验收缺口保持不变。
 - SmartScreen 对比确认：旧 QuickADB、0.9.1 和 CodexInfo 均未签名；本地及 U 目录的 QuickADB 副本均无 `Zone.Identifier`。未签名不能单独解释这些应用的提示差异。截图中实际被阻止文件的启动来源尚未确认，因此本次没有宣称 SmartScreen 已解决，也没有修改安全策略、移除来源标记或添加必须签名的发布要求。
+- 发布文件 `QuickADB-0.9.2-x64.exe` 为 15,431,168 字节，导入表仅含 21 个 Windows 系统依赖，实际签名状态为 `NotSigned`。项目 artifacts 与 `U:\开发工作` 副本 SHA-256 均为 `B6B624A64FB08AC5E4DD15EED072E4BBC0396BF22543C259C105B1EF13CE0D41`。
 
 官方依据：[egui 窗口层级命令](https://docs.rs/egui/0.36.2/egui/viewport/enum.ViewportCommand.html)、[Windows 原生置顶窗口](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos)、[SmartScreen 文件与发布者信誉](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation)。
