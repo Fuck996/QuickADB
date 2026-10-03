@@ -96,6 +96,9 @@ enum Dialog {
     },
     Settings,
     Devices,
+    Notice {
+        message: String,
+    },
     Detail {
         device: Device,
         alias: String,
@@ -465,7 +468,7 @@ impl Drawer {
                                     },
                                 ));
                             if ui
-                                .add_enabled_ui(online, |ui| {
+                                .add_enabled_ui(device.selectable(), |ui| {
                                     frame
                                         .show(ui, |ui| {
                                             ui.set_width(row_width - 20.);
@@ -509,7 +512,7 @@ impl Drawer {
                                 .on_hover_text(if online {
                                     "点击选择，再次点击取消；可同时选择多台"
                                 } else {
-                                    &device.detail
+                                    "点击选择；安装时会尝试重新连接此无线设备"
                                 })
                                 .clicked()
                             {
@@ -542,7 +545,7 @@ impl Drawer {
         let selected = snapshot
             .devices
             .iter()
-            .filter(|d| d.selected && d.status == DeviceStatus::Online)
+            .filter(|d| d.selected && d.selectable())
             .count();
         let border = if hovering {
             GREEN
@@ -745,26 +748,37 @@ impl Drawer {
     fn footer(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) {
         if !snapshot.notice.is_empty() {
             ui.horizontal(|ui| {
-                let width = (ui.available_width() - 32.).max(1.);
-                egui::ScrollArea::vertical()
-                    .id_salt("notice")
-                    .max_height(52.)
-                    .min_scrolled_height(0.)
-                    .max_width(width)
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(&snapshot.notice)
-                                    .small()
-                                    .color(ui.visuals().warn_fg_color),
-                            )
-                            .wrap(),
-                        );
-                    });
-                if ui.small_button("×").on_hover_text("关闭提示").clicked() {
-                    self.backend.clear_notice();
-                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("×").on_hover_text("关闭提示").clicked() {
+                        self.backend.clear_notice();
+                    }
+                    let width = ui.available_width();
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(width, 24.),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            if ui
+                                .add(
+                                    egui::Label::new(
+                                        RichText::new(
+                                            snapshot.notice.lines().next().unwrap_or_default(),
+                                        )
+                                        .small()
+                                        .color(ui.visuals().warn_fg_color),
+                                    )
+                                    .truncate()
+                                    .sense(egui::Sense::click()),
+                                )
+                                .on_hover_text("点击查看完整提示")
+                                .clicked()
+                            {
+                                self.dialog = Some(Dialog::Notice {
+                                    message: snapshot.notice.clone(),
+                                });
+                            }
+                        },
+                    );
+                });
             });
         }
         ui.separator();
@@ -821,7 +835,10 @@ impl Drawer {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if matches!(
                         job.stage,
-                        JobStage::Queued | JobStage::Preparing | JobStage::Transferring
+                        JobStage::Queued
+                            | JobStage::Connecting
+                            | JobStage::Preparing
+                            | JobStage::Transferring
                     ) {
                         if ui.small_button("取消").clicked() {
                             self.backend.cancel(job.id);
@@ -859,7 +876,10 @@ impl Drawer {
                 );
             } else {
                 ui.horizontal(|ui| {
-                    if matches!(job.stage, JobStage::Preparing | JobStage::Installing) {
+                    if matches!(
+                        job.stage,
+                        JobStage::Connecting | JobStage::Preparing | JobStage::Installing
+                    ) {
                         ui.add(egui::Spinner::new().size(12.));
                     }
                     let color = match job.stage {
@@ -1291,6 +1311,13 @@ impl Drawer {
                             });
                         }
                     });
+                }
+                Dialog::Notice { message } => {
+                    modal_heading(ui, "提示详情", &mut close);
+                    egui::ScrollArea::vertical().max_height(360.).show(ui, |ui| {
+                        ui.add(egui::Label::new(message.as_str()).wrap());
+                    });
+                    if ui.button("复制完整提示").clicked() { ctx.copy_text(message.clone()); }
                 }
                 Dialog::Detail { device, alias } => {
                     modal_heading(ui, "设备详情", &mut close);

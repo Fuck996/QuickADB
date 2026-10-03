@@ -12,6 +12,14 @@ pub struct Settings {
     pub window_position: Option<[f32; 2]>,
     pub aliases: BTreeMap<String, String>,
     pub endpoints: Vec<Endpoint>,
+    pub device_info: BTreeMap<String, DeviceInfo>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    pub model: String,
+    pub serial: String,
+    pub android: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,9 +73,18 @@ pub struct Device {
     pub endpoint: Option<Endpoint>,
 }
 
+impl Device {
+    pub fn selectable(&self) -> bool {
+        self.status == DeviceStatus::Online
+            || self.endpoint.is_some()
+            || self.id.starts_with("tls:")
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JobStage {
     Queued,
+    Connecting,
     Preparing,
     Transferring,
     Installing,
@@ -81,13 +98,18 @@ impl JobStage {
     pub fn active(&self) -> bool {
         matches!(
             self,
-            Self::Queued | Self::Preparing | Self::Transferring | Self::Installing
+            Self::Queued
+                | Self::Connecting
+                | Self::Preparing
+                | Self::Transferring
+                | Self::Installing
         )
     }
 
     pub fn label(&self) -> &'static str {
         match self {
             Self::Queued => "排队中",
+            Self::Connecting => "正在连接设备…",
             Self::Preparing => "准备安装",
             Self::Transferring => "正在传输",
             Self::Installing => "正在安装…",

@@ -48,8 +48,13 @@ enum Packages {
 struct QueueItem {
     job: Job,
     apks: Vec<Apk>,
-    client: Arc<AdbClient>,
+    target: Device,
     cancel: CancellationToken,
+}
+
+enum WirelessTarget {
+    Paired(String),
+    Address(Endpoint),
 }
 
 struct Engine {
@@ -59,6 +64,7 @@ struct Engine {
     clients: AsyncMutex<BTreeMap<String, Arc<AdbClient>>>,
     usb: Mutex<BTreeMap<String, UsbDeviceInfo>>,
     connecting: Mutex<BTreeSet<String>>,
+    connection_locks: AsyncMutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     lanes: AsyncMutex<BTreeMap<String, mpsc::UnboundedSender<QueueItem>>>,
     cancellations: Mutex<BTreeMap<u64, CancellationToken>>,
     next_job: AtomicU64,
@@ -72,13 +78,18 @@ impl Backend {
             .enable_all()
             .worker_threads(3)
             .build()?;
+        let devices = saved_devices(&storage);
         let engine = Arc::new(Engine {
             credential: storage.credential()?,
             storage,
-            state: Mutex::new(Snapshot::default()),
+            state: Mutex::new(Snapshot {
+                devices,
+                ..Default::default()
+            }),
             clients: AsyncMutex::new(BTreeMap::new()),
             usb: Mutex::new(BTreeMap::new()),
             connecting: Mutex::new(BTreeSet::new()),
+            connection_locks: AsyncMutex::new(BTreeMap::new()),
             lanes: AsyncMutex::new(BTreeMap::new()),
             cancellations: Mutex::new(BTreeMap::new()),
             next_job: AtomicU64::new(1),
@@ -136,7 +147,7 @@ impl Backend {
             .expect("state lock poisoned")
             .devices
             .iter_mut()
-            .find(|d| d.id == id && d.status == DeviceStatus::Online)
+            .find(|d| d.id == id && d.selectable())
         {
             device.selected = !device.selected;
         }
@@ -150,7 +161,7 @@ impl Backend {
             .expect("state lock poisoned")
             .devices
         {
-            if device.status == DeviceStatus::Online {
+            if device.selectable() {
                 device.selected = selected;
             }
         }
@@ -183,6 +194,14 @@ impl Backend {
             engine.state.lock().expect("state lock poisoned").pairing = false;
             match result {
                 Ok(result) => {
+                    {
+                        let mut state = engine.state.lock().expect("state lock poisoned");
+                        for device in saved_devices(&engine.storage) {
+                            if !state.devices.iter().any(|known| known.id == device.id) {
+                                state.devices.push(device);
+                            }
+                        }
+                    }
                     engine.notice("配对成功，正在查找设备的无线连接服务");
                     match connection_port {
                         Some(port) => {
@@ -207,6 +226,10 @@ impl Backend {
     }
 
     pub fn retry_connection(&self, id: String) {
+        if let Some(device_id) = id.strip_prefix("tls:") {
+            self.connect_paired(device_id.to_owned());
+            return;
+        }
         let endpoint = self
             .snapshot()
             .devices
@@ -357,11 +380,11 @@ impl Backend {
         let targets: Vec<_> = state
             .devices
             .iter()
-            .filter(|d| d.selected && d.status == DeviceStatus::Online)
+            .filter(|d| d.selected && d.selectable())
             .cloned()
             .collect();
         if targets.is_empty() {
-            state.notice = "请先点击选择至少一台已连接设备，再点击安装".into();
+            state.notice = "请先点击选择至少一台设备，再点击安装；离线无线设备会尝试重连".into();
             return;
         }
         if self
@@ -385,11 +408,11 @@ impl Backend {
             .snapshot()
             .devices
             .into_iter()
-            .filter(|d| d.selected && d.status == DeviceStatus::Online)
+            .filter(|d| d.selected && d.selectable())
             .collect();
         if targets.is_empty() {
             self.engine
-                .notice("请先点击选择至少一台已连接设备，再点击安装");
+                .notice("请先点击选择至少一台设备，再点击安装；离线无线设备会尝试重连");
             return;
         }
         if self
@@ -418,7 +441,7 @@ impl Backend {
         let Some(device) = snapshot
             .devices
             .iter()
-            .find(|d| d.id == job.device_id && d.status == DeviceStatus::Online)
+            .find(|d| d.id == job.device_id && d.selectable())
         else {
             self.engine.notice("原目标设备未连接，请连接原设备后重试");
             return;
@@ -603,133 +626,240 @@ impl Engine {
             Ok::<_, anyhow::Error>(client)
         }
         .await;
-        self.finish_connect(id, result).await;
+        let _ = self.finish_connect(id, result, &self.stop).await;
     }
 
     async fn connect_paired(self: Arc<Self>, device_id: String) {
-        if !self
-            .storage
-            .paired_devices()
-            .iter()
-            .any(|d| d.device_id == device_id)
+        if let Err(error) = self
+            .clone()
+            .connect_wireless(WirelessTarget::Paired(device_id), &self.stop)
+            .await
         {
-            self.notice("此无线设备尚未与 QuickADB 配对");
-            return;
-        }
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-        self.notice("正在自动查找设备的无线连接端口…");
-        loop {
-            let endpoint = self
-                .state
-                .lock()
-                .expect("state lock poisoned")
-                .discovered
-                .iter()
-                .find(|d| d.paired_id() == Some(device_id.as_str()))
-                .map(|d| Endpoint {
-                    paired_id: Some(device_id.clone()),
-                    ..d.endpoint.clone()
-                });
-            if let Some(endpoint) = endpoint {
-                self.connect_endpoint(endpoint).await;
-                return;
-            }
-            tokio::select! {
-                _ = self.stop.cancelled() => return,
-                _ = tokio::time::sleep_until(deadline) => {
-                    self.notice("配对记录已保存，但尚未发现设备的连接服务。请确认手机已开启无线调试、电脑与手机在同一局域网；也可在“已配对设备”中展开手动填写连接端口。");
-                    return;
-                }
-                _ = tokio::time::sleep(Duration::from_millis(250)) => {}
-            }
+            self.notice(&format!("无线连接失败：{error:#}"));
         }
     }
 
     async fn connect_endpoint(self: Arc<Self>, endpoint: Endpoint) {
-        let id = endpoint.key();
-        if self.clients.lock().await.contains_key(&id) {
-            self.notice("此设备连接已经打开");
-            return;
-        }
-        if !self.start_connect(
-            &id,
-            &format!("{}:{}", endpoint.host, endpoint.port),
-            Some(endpoint.clone()),
-        ) {
-            return;
-        }
-        let result = async {
-            ensure!(
-                !endpoint.host.trim().is_empty() && endpoint.port > 0,
-                "设备地址或端口无效"
-            );
-            let transport: Box<dyn droidmux::transport::AdbTransport> =
-                if let Some(device_id) = &endpoint.paired_id {
-                    use droidmux::pairing::CredentialStore;
-                    ensure!(
-                        self.storage.load_paired_device(device_id).await?.is_some(),
-                        "此无线设备尚未与 QuickADB 配对"
-                    );
-                    Box::new(
-                        WirelessTransport::connect(
-                            &endpoint.host,
-                            endpoint.port,
-                            &self.credential,
-                            WirelessTransportConfig {
-                                read_timeout: Duration::from_secs(660),
-                                ..Default::default()
-                            },
-                        )
-                        .await?,
-                    )
-                } else {
-                    let address = tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
-                        .await?
-                        .next()
-                        .context("设备地址未解析到可连接地址")?;
-                    Box::new(
-                        TcpTransport::connect(
-                            address,
-                            TcpTransportConfig {
-                                read_timeout: Duration::from_secs(660),
-                                ..Default::default()
-                            },
-                        )
-                        .await?,
-                    )
-                };
-            let engine = self.clone();
-            let observer_id = id.clone();
-            let client = tokio::time::timeout(
-                Duration::from_secs(120),
-                AdbClient::connect_with_observer(
-                    transport,
-                    self.credential.clone(),
-                    move |state| {
-                        if state == ConnectionState::AwaitingAuthorization {
-                            engine.update_device(&observer_id, |d| {
-                                d.status = DeviceStatus::Unauthorized
-                            });
-                        }
-                    },
-                ),
-            )
+        if let Err(error) = self
+            .clone()
+            .connect_wireless(WirelessTarget::Address(endpoint), &self.stop)
             .await
-            .context("等待无线设备授权超时")??;
-            self.storage.update_settings(|settings| {
-                settings.endpoints.retain(|e| e.key() != id);
-                settings.endpoints.push(endpoint.clone());
-            })?;
-            Ok::<_, anyhow::Error>(client)
+        {
+            self.notice(&format!("无线连接失败：{error:#}"));
         }
-        .await;
-        self.finish_connect(id, result).await;
     }
 
-    async fn finish_connect(self: &Arc<Self>, id: String, result: Result<AdbClient>) {
-        match result {
+    async fn connect_wireless(
+        self: Arc<Self>,
+        target: WirelessTarget,
+        cancel: &CancellationToken,
+    ) -> Result<Arc<AdbClient>> {
+        let (id, endpoint) = match &target {
+            WirelessTarget::Paired(device_id) => {
+                ensure!(
+                    self.storage
+                        .paired_devices()
+                        .iter()
+                        .any(|d| d.device_id == *device_id),
+                    "此无线设备尚未与 QuickADB 配对"
+                );
+                let id = format!("tls:{device_id}");
+                let endpoint = self
+                    .storage
+                    .settings()
+                    .endpoints
+                    .into_iter()
+                    .find(|e| e.key() == id);
+                (id, endpoint)
+            }
+            WirelessTarget::Address(endpoint) => (endpoint.key(), Some(endpoint.clone())),
+        };
+        let gate = self
+            .connection_locks
+            .lock()
+            .await
+            .entry(id.clone())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone();
+        let _connection = tokio::select! {
+            _ = cancel.cancelled() => anyhow::bail!("连接已取消"),
+            _ = self.stop.cancelled() => anyhow::bail!("应用正在退出"),
+            guard = gate.lock() => guard,
+        };
+        {
+            let mut clients = self.clients.lock().await;
+            if let Some(client) = clients.get(&id) {
+                if client.state() != ConnectionState::Closed {
+                    return Ok(client.clone());
+                }
+                clients.remove(&id);
+            }
+        }
+        ensure!(
+            self.start_connect(&id, &id, endpoint),
+            "设备连接请求正在处理中"
+        );
+        let attempt = async {
+            match target {
+                WirelessTarget::Address(endpoint) => self.dial_endpoint(&id, endpoint).await,
+                WirelessTarget::Paired(device_id) => {
+                    self.update_device(&id, |d| d.detail = "正在查找当前无线连接端口…".into());
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+                    let mut last_error = None;
+                    loop {
+                        let endpoint = self
+                            .state
+                            .lock()
+                            .expect("state lock poisoned")
+                            .discovered
+                            .iter()
+                            .find(|d| d.paired_id() == Some(device_id.as_str()))
+                            .map(|d| Endpoint {
+                                paired_id: Some(device_id.clone()),
+                                ..d.endpoint.clone()
+                            });
+                        if let Some(endpoint) = endpoint {
+                            self.update_device(&id, |d| d.endpoint = Some(endpoint.clone()));
+                            match self.dial_endpoint(&id, endpoint).await {
+                                Ok(client) => return Ok(client),
+                                Err(error) => {
+                                    self.update_device(&id, |d| {
+                                        d.detail = format!("等待无线连接恢复：{error:#}")
+                                    });
+                                    last_error = Some(error);
+                                }
+                            }
+                        }
+                        if tokio::time::Instant::now() >= deadline {
+                            return Err(match last_error {
+                                Some(error) => error.context("无线重连失败"),
+                                None => anyhow::anyhow!(
+                                    "尚未发现此设备的无线连接服务。请开启手机无线调试并确认与电脑在同一局域网；配对记录仍保留。"
+                                ),
+                            });
+                        }
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                }
+            }
+        };
+        let result = tokio::select! {
+            _ = cancel.cancelled() => Err(anyhow::anyhow!("连接已取消")),
+            _ = self.stop.cancelled() => Err(anyhow::anyhow!("应用正在退出")),
+            result = tokio::time::timeout(Duration::from_secs(30), attempt) => {
+                result.context("无线连接超时，请检查手机无线调试与网络").and_then(|result| result)
+            },
+        };
+        self.finish_connect(id, result, cancel).await
+    }
+
+    async fn dial_endpoint(self: &Arc<Self>, id: &str, endpoint: Endpoint) -> Result<AdbClient> {
+        ensure!(
+            !endpoint.host.trim().is_empty() && endpoint.port > 0,
+            "设备地址或端口无效"
+        );
+        let transport: Box<dyn droidmux::transport::AdbTransport> =
+            if let Some(device_id) = &endpoint.paired_id {
+                use droidmux::pairing::CredentialStore;
+                ensure!(
+                    self.storage.load_paired_device(device_id).await?.is_some(),
+                    "此无线设备尚未与 QuickADB 配对"
+                );
+                Box::new(
+                    WirelessTransport::connect(
+                        &endpoint.host,
+                        endpoint.port,
+                        &self.credential,
+                        WirelessTransportConfig {
+                            read_timeout: Duration::from_secs(660),
+                            ..Default::default()
+                        },
+                    )
+                    .await?,
+                )
+            } else {
+                let address = tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
+                    .await?
+                    .next()
+                    .context("设备地址未解析到可连接地址")?;
+                Box::new(
+                    TcpTransport::connect(
+                        address,
+                        TcpTransportConfig {
+                            read_timeout: Duration::from_secs(660),
+                            ..Default::default()
+                        },
+                    )
+                    .await?,
+                )
+            };
+        let engine = self.clone();
+        let observer_id = id.to_owned();
+        let client = tokio::time::timeout(
+            Duration::from_secs(120),
+            AdbClient::connect_with_observer(transport, self.credential.clone(), move |state| {
+                if state == ConnectionState::AwaitingAuthorization {
+                    engine.update_device(&observer_id, |d| d.status = DeviceStatus::Unauthorized);
+                }
+            }),
+        )
+        .await
+        .context("等待无线设备授权超时")??;
+        Ok(client)
+    }
+
+    async fn finish_connect(
+        self: &Arc<Self>,
+        id: String,
+        result: Result<AdbClient>,
+        cancel: &CancellationToken,
+    ) -> Result<Arc<AdbClient>> {
+        let result = match result {
             Ok(client) => {
-                let info = shell_text(&client, "getprop ro.product.model; getprop ro.serialno; getprop ro.build.version.release").await;
+                let info = tokio::select! {
+                    _ = cancel.cancelled() => Err(anyhow::anyhow!("连接已取消")),
+                    result = shell_text(&client, "getprop ro.product.model; getprop ro.serialno; getprop ro.build.version.release") => result,
+                };
+                let info = info.and_then(|output| {
+                    let expected = self
+                        .storage
+                        .settings()
+                        .device_info
+                        .get(&id)
+                        .map(|d| d.serial.clone());
+                    if let Some(expected) = expected.filter(|s| !s.is_empty()) {
+                        ensure!(
+                            output.lines().nth(1).unwrap_or("").trim() == expected,
+                            "连接到的设备序列号与原记录不同，已停止连接与安装"
+                        );
+                    }
+                    if id.starts_with("tls:") || id.starts_with("tcp://") {
+                        let lines: Vec<_> = output.lines().collect();
+                        let endpoint = self
+                            .state
+                            .lock()
+                            .expect("state lock poisoned")
+                            .devices
+                            .iter()
+                            .find(|d| d.id == id)
+                            .and_then(|d| d.endpoint.clone());
+                        self.storage.update_settings(|settings| {
+                            if let Some(endpoint) = endpoint {
+                                settings.endpoints.retain(|e| e.key() != id);
+                                settings.endpoints.push(endpoint);
+                            }
+                            settings.device_info.insert(
+                                id.clone(),
+                                DeviceInfo {
+                                    model: lines.first().copied().unwrap_or("").trim().into(),
+                                    serial: lines.get(1).copied().unwrap_or("").trim().into(),
+                                    android: lines.get(2).copied().unwrap_or("").trim().into(),
+                                },
+                            );
+                        })?;
+                    }
+                    Ok(output)
+                });
                 match info {
                     Ok(output) => {
                         let lines: Vec<_> = output.lines().collect();
@@ -749,30 +879,34 @@ impl Engine {
                         });
                         let client = Arc::new(client);
                         self.clients.lock().await.insert(id.clone(), client.clone());
-                        tokio::spawn(self.clone().watch_connection(id.clone(), client));
+                        tokio::spawn(self.clone().watch_connection(id.clone(), client.clone()));
+                        Ok(client)
                     }
                     Err(error) => {
                         self.update_device(&id, |d| {
                             d.status = DeviceStatus::Offline;
                             d.detail = format!("读取设备信息失败：{error:#}");
-                            d.selected = false;
                         });
                         if let Err(error) = client.close().await {
                             self.notice(&format!("读取设备信息失败后关闭连接失败：{error}"));
                         }
+                        Err(error)
                     }
                 }
             }
-            Err(error) => self.update_device(&id, |d| {
-                d.status = DeviceStatus::Offline;
-                d.detail = format!("{error:#}");
-                d.selected = false;
-            }),
-        }
+            Err(error) => {
+                self.update_device(&id, |d| {
+                    d.status = DeviceStatus::Offline;
+                    d.detail = format!("{error:#}");
+                });
+                Err(error)
+            }
+        };
         self.connecting
             .lock()
             .expect("connecting lock poisoned")
             .remove(&id);
+        result
     }
 
     async fn watch_connection(self: Arc<Self>, id: String, client: Arc<AdbClient>) {
@@ -802,7 +936,9 @@ impl Engine {
                 clients.remove(&id);
                 self.update_device(&id, |d| {
                     d.status = DeviceStatus::Offline;
-                    d.selected = false;
+                    if d.endpoint.is_none() && !d.id.starts_with("tls:") {
+                        d.selected = false;
+                    }
                     d.detail = format!("连接中断：{reason}");
                 });
                 drop(clients);
@@ -971,9 +1107,7 @@ impl Engine {
         } else {
             apks.into_iter().map(|p| vec![p]).collect()
         };
-        let clients = self.clients.lock().await;
         for target in targets {
-            let client = clients.get(&target.id).cloned();
             let lane_key = if target.serial.is_empty() {
                 target.id.clone()
             } else {
@@ -1009,17 +1143,6 @@ impl Engine {
                     detail: String::new(),
                     test_packages: test,
                 };
-                if client.is_none() {
-                    let mut job = job;
-                    job.stage = JobStage::Failed;
-                    job.detail = "原目标设备在 APK 检查期间断开，请连接原设备后重试".into();
-                    self.state
-                        .lock()
-                        .expect("state lock poisoned")
-                        .jobs
-                        .push(job);
-                    continue;
-                }
                 let cancel = CancellationToken::new();
                 self.cancellations
                     .lock()
@@ -1034,7 +1157,7 @@ impl Engine {
                     .send(QueueItem {
                         job,
                         apks: group.clone(),
-                        client: client.as_ref().expect("checked client").clone(),
+                        target: target.clone(),
                         cancel,
                     })
                     .is_err()
@@ -1066,23 +1189,39 @@ impl Engine {
             if item.cancel.is_cancelled() {
                 self.update_job(item.job.id, |j| j.stage = JobStage::Canceled);
             } else {
-                let result = install::install(
-                    item.client,
-                    &item.apks,
-                    item.job.test_packages,
-                    item.cancel,
-                    |progress| {
-                        self.update_job(item.job.id, |j| {
-                            j.stage = progress.stage;
-                            j.transferred = progress.bytes;
-                            j.total = progress.total;
-                            j.bytes_per_second = progress.speed;
-                            if !progress.detail.is_empty() {
-                                j.detail = progress.detail;
-                            }
-                        });
-                    },
-                )
+                self.update_job(item.job.id, |j| j.stage = JobStage::Connecting);
+                let result = async {
+                    let client = self
+                        .clone()
+                        .client_for_install(&item.target, &item.cancel)
+                        .await
+                        .map_err(|error| install::InstallError {
+                            stage: if item.cancel.is_cancelled() {
+                                JobStage::Canceled
+                            } else {
+                                JobStage::Failed
+                            },
+                            detail: format!("安装前连接失败，尚未传输 APK：{error:#}"),
+                        })?;
+                    install::install(
+                        client,
+                        &item.apks,
+                        item.job.test_packages,
+                        item.cancel,
+                        |progress| {
+                            self.update_job(item.job.id, |j| {
+                                j.stage = progress.stage;
+                                j.transferred = progress.bytes;
+                                j.total = progress.total;
+                                j.bytes_per_second = progress.speed;
+                                if !progress.detail.is_empty() {
+                                    j.detail = progress.detail;
+                                }
+                            });
+                        },
+                    )
+                    .await
+                }
                 .await;
                 match result {
                     Ok(()) => self.update_job(item.job.id, |j| {
@@ -1122,6 +1261,89 @@ impl Engine {
                 .remove(&item.job.id);
         }
     }
+
+    async fn client_for_install(
+        self: Arc<Self>,
+        target: &Device,
+        cancel: &CancellationToken,
+    ) -> Result<Arc<AdbClient>> {
+        ensure!(!cancel.is_cancelled(), "安装已取消");
+        let current = self.clients.lock().await.get(&target.id).cloned();
+        let client = if let Some(client) = current.filter(|c| c.state() != ConnectionState::Closed)
+        {
+            client
+        } else if let Some(device_id) = target.id.strip_prefix("tls:") {
+            self.clone()
+                .connect_wireless(WirelessTarget::Paired(device_id.to_owned()), cancel)
+                .await?
+        } else if let Some(endpoint) = &target.endpoint {
+            self.clone()
+                .connect_wireless(WirelessTarget::Address(endpoint.clone()), cancel)
+                .await?
+        } else {
+            anyhow::bail!("原目标 USB 设备已断开，请接回原设备")
+        };
+        if !target.serial.is_empty() {
+            let state = self.state.lock().expect("state lock poisoned");
+            ensure!(
+                state
+                    .devices
+                    .iter()
+                    .any(|d| d.id == target.id && d.serial == target.serial),
+                "当前连接与提交时选择的设备不一致，已停止安装"
+            );
+        }
+        ensure!(!cancel.is_cancelled(), "安装已取消");
+        Ok(client)
+    }
+}
+
+fn saved_devices(storage: &Storage) -> Vec<Device> {
+    let settings = storage.settings();
+    let mut endpoints: BTreeMap<_, _> = settings
+        .endpoints
+        .iter()
+        .map(|e| (e.key(), Some(e.clone())))
+        .collect();
+    for paired in storage.paired_devices() {
+        endpoints
+            .entry(format!("tls:{}", paired.device_id))
+            .or_insert(None);
+    }
+    endpoints
+        .into_iter()
+        .map(|(id, endpoint)| {
+            let info = settings.device_info.get(&id);
+            let serial = info.map(|d| d.serial.clone()).unwrap_or_default();
+            let model = info
+                .filter(|d| !d.model.is_empty())
+                .map(|d| d.model.clone())
+                .unwrap_or_else(|| {
+                    endpoint
+                        .as_ref()
+                        .map(|e| format!("{}:{}", e.host, e.port))
+                        .unwrap_or_else(|| {
+                            format!("已配对设备 · {}", id.trim_start_matches("tls:"))
+                        })
+                });
+            Device {
+                name: settings
+                    .aliases
+                    .get(&serial)
+                    .cloned()
+                    .unwrap_or_else(|| model.clone()),
+                model,
+                serial,
+                android: info.map(|d| d.android.clone()).unwrap_or_default(),
+                transport: "无线".into(),
+                status: DeviceStatus::Offline,
+                detail: "已保存设备；选择后安装时自动尝试重连".into(),
+                selected: false,
+                endpoint,
+                id,
+            }
+        })
+        .collect()
 }
 
 pub async fn shell_text(client: &AdbClient, command: &str) -> Result<String> {
