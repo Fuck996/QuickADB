@@ -110,3 +110,19 @@
 - 发布文件 `QuickADB-0.9.2-x64.exe` 为 15,431,168 字节，导入表仅含 21 个 Windows 系统依赖，实际签名状态为 `NotSigned`。项目 artifacts 与 `U:\开发工作` 副本 SHA-256 均为 `B6B624A64FB08AC5E4DD15EED072E4BBC0396BF22543C259C105B1EF13CE0D41`。
 
 官方依据：[egui 窗口层级命令](https://docs.rs/egui/0.36.2/egui/viewport/enum.ViewportCommand.html)、[Windows 原生置顶窗口](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos)、[SmartScreen 文件与发布者信誉](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation)。
+
+## 0.9.3 保存设备、安装前重连与桌面工作台
+
+- 主列表启动时合并已保存连接地址与配对 GUID，恢复型号、序列号、Android 版本及备注；配对记录尚无连接端口时也保留为离线设备，不伪造地址或端口。设备上线及应用重启不会自动替用户选中目标。
+- 原设备队列开始安装时获取当前连接。已配对无线设备按原 GUID 查找当前 mDNS 端口，连接并核对身份后才传 APK；普通已保存 TCP 设备按原地址重连并核对已知序列号。连接中的取消、失败和超时保持明确状态，同一设备的并发重连共用连接锁，不创建另一套任务队列，也不自动重放已开始的安装。
+- 应用集成测试 17 项通过（安装 8、队列 9）。新增/扩展覆盖端口变化、存储重新打开、仅配对记录的离线设备、连接取消与超时后队列继续、安装前身份不符、相同地址的无关 GUID 广播、之后显式重试及精确传输内容。SDK 配对底层未改动，沿用既有配对测试结果。
+- 底部提示限制为可用宽度内的单行，独立保留关闭操作；点击进入完整文本与复制弹窗。实际 Release 中长 ADB 错误没有撑宽窗口，离线设备卡片可通过真实 UIAutomation 选中，切换模式后保留选择。
+- 抽屉增高为 440 × 780，并根据实际显示器工作区域限制尺寸和位置。标准窗口使用原生标题栏、调整边框、最小化和最大化按钮，通过 winit 官方 Windows API 切换任务栏显示；宽窗口改为独立设备侧栏、右上安装包准备区和右下任务表格，窄窗口将设备选择区折叠、任务改为卡片。模式与标准窗口正常尺寸、位置单独持久化。
+- 直接复用生产 UI 和真实后台的隔离协议夹具验证：三个 APK 准备完成时任务数为零、安装按钮在未选设备时禁用；通过全选与主安装按钮提交到两台设备，六项实际协议安装成功。服务端记录每台各三次上传，所有字节与原文件相同。详情按钮未误改变目标选择；浅色、深色、表头列宽、长文件名和真实结果均检查。此夹具注入的是 egui 文件事件，不等于 Windows Explorer 的 OLE 拖放验收。
+- 实际 Windows 操作确认标准窗口有调整边框和最大化/最小化样式，并能改变尺寸、最大化、最小化和恢复。取消置顶后，普通测试窗口确实获得前台焦点，工作台仍可见；关闭后隐藏且进程常驻、托盘重新展开、正式菜单退出均通过。最大化按钮采用系统原生标题栏；Windows 11 贴靠菜单遵循系统行为，未将菜单交互本身标为自动化验收通过。
+- 原生应用 `clippy --lib --bin QuickADB -- -D warnings`、格式和 diff 检查通过。未将 `--all-targets` 严格 Clippy 标为通过：原有安装测试含空字符后紧跟数字、锁作用域及测试辅助函数未使用等 lint；应用集成测试通过记录与该检查区分。
+- 最终 Release 再次从持久化设置启动，恢复标准窗口模式、外框 560 × 720 及位置 (800, 350)，已保存的离线无线设备仍在选择区，选择保持初始未选中。宽窗口侧栏默认 272，设备卡片宽度计入边框与内边距，未继续撑到最大宽度。完整提示文本显示为两行，复制入口可用；连接弹窗主按钮在增高后的内容区完整可见。
+- 最终 EXE 的文件版本和产品版本均为 0.9.3，21 个导入依赖均为 Windows 系统库。`QuickADB-0.9.3-x64.exe` 为 15,581,184 字节，签名状态保持 `NotSigned`。项目 artifacts 与 `U:\开发工作` 副本 SHA-256 均为 `2D27D5F676CF40059389EF2B53F8B2FA1C3A80572952039A474B5D4318AB0F03`。最终实例均通过正式菜单正常退出，Release 实例未提交 APK，协议 UI 夹具的六次上传记录单独核验；本地截图包括 `logs/workbench-release-0.9.3.png`、`logs/workbench-jobs-dark-final.png` 与 `logs/connection-height-0.9.3-verified.png`，不提交生成图片与日志。
+- 缺少真实 Android 设备，USB 授权、真实无线配对、实际局域网重连与签名 APK 的 Android 安装结果仍待真机验收。既有 Explorer OLE 拖放和系统文件选择器自动化验收缺口保留；此次不修改 Windows 防护、文件来源标记、签名或图标方案。
+
+官方依据：[AOSP ADB Wi-Fi 架构](https://android.googlesource.com/platform/packages/modules/adb/+/HEAD/docs/dev/adb_wifi.md)、[微软多面板布局](https://learn.microsoft.com/en-us/windows/apps/develop/ui/controls/list-details)、[Windows 命令栏](https://learn.microsoft.com/en-us/windows/apps/design/controls/command-bar)、[原生最大化按钮与贴靠布局](https://learn.microsoft.com/en-us/windows/apps/desktop/modernize/ui/apply-snap-layout-menu)。
