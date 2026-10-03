@@ -467,7 +467,7 @@ impl Drawer {
                                         ui.visuals().widgets.noninteractive.bg_stroke.color
                                     },
                                 ));
-                            if ui
+                            let selection = ui
                                 .add_enabled_ui(device.selectable(), |ui| {
                                     frame
                                         .show(ui, |ui| {
@@ -508,7 +508,16 @@ impl Drawer {
                                         .response
                                         .interact(egui::Sense::click())
                                 })
-                                .inner
+                                .inner;
+                            selection.widget_info(|| {
+                                egui::WidgetInfo::selected(
+                                    egui::WidgetType::Checkbox,
+                                    device.selectable(),
+                                    device.selected,
+                                    format!("选择设备：{}", device.name),
+                                )
+                            });
+                            if selection
                                 .on_hover_text(if online {
                                     "点击选择，再次点击取消；可同时选择多台"
                                 } else {
