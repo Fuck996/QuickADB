@@ -14,9 +14,11 @@ use tray_icon::{
     MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
     menu::{Menu, MenuEvent, MenuItem},
 };
+use winit::platform::windows::WindowExtWindows;
 
 const WIDTH: f32 = 440.;
-const HEIGHT: f32 = 660.;
+const HEIGHT: f32 = 780.;
+const WINDOW_SIZE: [f32; 2] = [960., 780.];
 const GREEN: Color32 = Color32::from_rgb(37, 173, 115);
 const PRIMARY_GREEN: Color32 = Color32::from_rgb(20, 133, 84);
 
@@ -31,21 +33,32 @@ pub fn run(storage: Arc<Storage>, backend: Backend) -> eframe::Result {
         height: icon.height(),
     };
     let start_in_tray = std::env::args().any(|a| a == "--tray");
+    let size = if settings.windowed {
+        settings.standard_window_size.unwrap_or(WINDOW_SIZE)
+    } else {
+        [WIDTH, HEIGHT]
+    };
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("QuickADB")
-        .with_inner_size([WIDTH, HEIGHT])
-        .with_decorations(false)
-        .with_resizable(false)
+        .with_inner_size(size)
+        .with_min_inner_size([WIDTH, if settings.windowed { 480. } else { 64. }])
+        .with_decorations(settings.windowed)
+        .with_resizable(settings.windowed)
         .with_drag_and_drop(true)
-        .with_taskbar(false)
+        .with_taskbar(settings.windowed)
         .with_window_level(window_level(&settings))
         .with_visible(!start_in_tray)
         .with_active(!start_in_tray)
         .with_icon(Arc::new(data));
     let area = platform::monitor_work_area();
-    let position = settings.window_position.unwrap_or([
-        area.right as f32 - WIDTH - 24.,
-        area.bottom as f32 - HEIGHT - 24.,
+    let position = if settings.windowed {
+        settings.standard_window_position
+    } else {
+        settings.window_position
+    }
+    .unwrap_or([
+        area.right as f32 - size[0] - 24.,
+        area.bottom as f32 - size[1] - 24.,
     ]);
     viewport = viewport.with_position(position);
     let options = eframe::NativeOptions {
@@ -131,6 +144,8 @@ struct Drawer {
     last_position: Option<[f32; 2]>,
     position_changed: Instant,
     position_checked: bool,
+    applied_windowed: bool,
+    last_size: Option<[f32; 2]>,
 }
 
 impl Drawer {
@@ -171,6 +186,7 @@ impl Drawer {
             cc.egui_ctx
                 .send_viewport_cmd(ViewportCommand::Visible(false));
         }
+        let applied_windowed = preferences.windowed;
         let app = Self {
             backend,
             storage,
@@ -191,6 +207,8 @@ impl Drawer {
             last_position: None,
             position_changed: Instant::now(),
             position_checked: false,
+            applied_windowed,
+            last_size: None,
         };
         app.apply_style(&cc.egui_ctx);
         cc.egui_ctx
@@ -270,6 +288,9 @@ impl Drawer {
             settings.topmost = self.preferences.topmost;
             settings.test_packages = self.preferences.test_packages;
             settings.window_position = self.preferences.window_position;
+            settings.windowed = self.preferences.windowed;
+            settings.standard_window_size = self.preferences.standard_window_size;
+            settings.standard_window_position = self.preferences.standard_window_position;
         }) {
             self.backend.notify(&format!("设置保存失败：{error:#}"));
         }
@@ -278,10 +299,11 @@ impl Drawer {
     fn show(&mut self, ctx: &egui::Context, anchor: Option<[f32; 2]>) {
         if let Some([x, y]) = anchor
             && !self.preferences.pinned
+            && !self.preferences.windowed
         {
             let dpi = ctx.input(|i| i.viewport().native_pixels_per_point.unwrap_or(1.));
             let area = platform::monitor_work_area();
-            let height = if self.collapsed { 64. } else { HEIGHT };
+            let height = ctx.content_rect().height();
             let left = area.left as f32 / dpi;
             let top = area.top as f32 / dpi;
             let position = egui::pos2(
@@ -294,6 +316,7 @@ impl Drawer {
         self.opened = Instant::now();
         self.was_focused = false;
         ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(window_level(
             &self.preferences,
         )));
@@ -303,6 +326,36 @@ impl Drawer {
     fn hide(&mut self, ctx: &egui::Context) {
         self.hidden = true;
         ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+    }
+
+    fn set_window_mode(&mut self, ctx: &egui::Context, windowed: bool) {
+        self.preferences.windowed = windowed;
+        self.collapsed = false;
+        self.position_checked = false;
+        self.last_position = None;
+        self.last_size = None;
+        ctx.send_viewport_cmd(ViewportCommand::Maximized(false));
+        ctx.send_viewport_cmd(ViewportCommand::Decorations(windowed));
+        ctx.send_viewport_cmd(ViewportCommand::Resizable(windowed));
+        ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(Vec2::new(
+            WIDTH,
+            if windowed { 480. } else { 64. },
+        )));
+        let size = if windowed {
+            self.preferences.standard_window_size.unwrap_or(WINDOW_SIZE)
+        } else {
+            [WIDTH, HEIGHT]
+        };
+        ctx.send_viewport_cmd(ViewportCommand::InnerSize(size.into()));
+        let position = if windowed {
+            self.preferences.standard_window_position
+        } else {
+            self.preferences.window_position
+        };
+        if let Some(position) = position {
+            ctx.send_viewport_cmd(ViewportCommand::OuterPosition(position.into()));
+        }
+        self.persist();
     }
 
     fn request_exit(&mut self, ctx: &egui::Context) {
@@ -347,23 +400,28 @@ impl Drawer {
                 );
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add(egui::Button::new("×").frame(false))
-                    .on_hover_text("收回托盘，安装继续")
-                    .clicked()
+                if !self.preferences.windowed
+                    && ui
+                        .add(egui::Button::new("×").frame(false))
+                        .on_hover_text("收回托盘，安装继续")
+                        .clicked()
                 {
                     self.hide(ui.ctx());
                 }
-                if ui
-                    .add(egui::Button::new("−").frame(false))
-                    .on_hover_text("收成窄栏")
-                    .clicked()
+                if !self.preferences.windowed
+                    && ui
+                        .add(egui::Button::new("−").frame(false))
+                        .on_hover_text("收成窄栏")
+                        .clicked()
                 {
                     self.collapsed = true;
                     ui.ctx()
                         .send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(WIDTH, 64.)));
                 }
-                if pin_button(ui, self.preferences.pinned).clicked() {
+                if window_mode_button(ui, self.preferences.windowed).clicked() {
+                    self.set_window_mode(ui.ctx(), !self.preferences.windowed);
+                }
+                if pin_button(ui, self.preferences.pinned, self.preferences.windowed).clicked() {
                     self.preferences.pinned = !self.preferences.pinned;
                     ui.ctx()
                         .send_viewport_cmd(ViewportCommand::WindowLevel(window_level(
@@ -431,7 +489,11 @@ impl Drawer {
         } else {
             egui::ScrollArea::vertical()
                 .id_salt("devices")
-                .max_height(176.)
+                .max_height(if self.preferences.windowed {
+                    320.
+                } else {
+                    224.
+                })
                 .show(ui, |ui| {
                     for device in &snapshot.devices {
                         ui.horizontal(|ui| {
@@ -1256,7 +1318,7 @@ impl Drawer {
         let mut close = false;
         let dialog_height = (ctx.content_rect().height() - 64.).max(120.);
         let response = egui::Modal::new(egui::Id::new("drawer-dialog")).frame(egui::Frame::popup(&ctx.global_style()).corner_radius(14).inner_margin(16)).show(ctx, |ui| {
-            ui.set_width(368.);
+            ui.set_width((ctx.content_rect().width() - 64.).min(if self.preferences.windowed { 520. } else { 368. }).max(1.));
             egui::ScrollArea::vertical()
                 .id_salt("dialog-content")
                 .max_height(dialog_height)
@@ -1267,6 +1329,10 @@ impl Drawer {
                 Dialog::Connect { .. } => self.connection_form(ui, snapshot, &mut dialog, &mut close),
                 Dialog::Settings => {
                     modal_heading(ui, "设置", &mut close);
+                    let mut windowed = self.preferences.windowed;
+                    if ui.checkbox(&mut windowed, "标准窗口模式（支持调整大小与 Windows 贴靠）").changed() {
+                        self.set_window_mode(ctx, windowed);
+                    }
                     ui.label(RichText::new("常驻行为").strong());
                     let before = self.preferences.startup;
                     if ui.checkbox(&mut self.preferences.startup, "开机启动，静默进入托盘").changed() {
@@ -1392,24 +1458,42 @@ impl eframe::App for Drawer {
             );
             if self.collapsed {
                 self.collapsed = false;
+                self.position_checked = false;
                 ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(WIDTH, HEIGHT)));
             }
             self.show(ctx, None);
         }
     }
 
-    fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if self.applied_windowed != self.preferences.windowed {
+            if let Some(window) = frame.winit_window() {
+                window.set_skip_taskbar(!self.preferences.windowed);
+            }
+            self.applied_windowed = self.preferences.windowed;
+        }
         if self.hidden && platform::window_visible() {
             self.show(ctx, None);
         }
         if !self.position_checked
-            && let Some(position) =
-                ctx.input(|i| i.viewport().outer_rect.map(|r| [r.min.x, r.min.y]))
+            && let Some((outer, inner, dpi)) = ctx.input(|i| {
+                let viewport = i.viewport();
+                Some((
+                    viewport.outer_rect?,
+                    viewport.inner_rect?,
+                    viewport.native_pixels_per_point?,
+                ))
+            })
         {
-            let dpi = ctx.input(|i| i.viewport().native_pixels_per_point.unwrap_or(1.));
-            match platform::clamp_position(position, [WIDTH, HEIGHT], dpi) {
-                Ok(position) => {
-                    ctx.send_viewport_cmd(ViewportCommand::OuterPosition(position.into()))
+            match platform::fit_window_to_work_area(outer.min.into(), outer.size().into(), dpi) {
+                Ok((position, size)) => {
+                    if Vec2::from(size) != outer.size() {
+                        let chrome = outer.size() - inner.size();
+                        ctx.send_viewport_cmd(ViewportCommand::InnerSize(
+                            Vec2::from(size) - chrome,
+                        ));
+                    }
+                    ctx.send_viewport_cmd(ViewportCommand::OuterPosition(position.into()));
                 }
                 Err(error) => self.backend.notify(&format!("恢复窗口位置失败：{error:#}")),
             }
@@ -1448,6 +1532,7 @@ impl eframe::App for Drawer {
             if self.was_focused
                 && !focused
                 && !self.preferences.pinned
+                && !self.preferences.windowed
                 && self.dialog.is_none()
                 && !self.drag_hovering
                 && !platform::pointer_button_down()
@@ -1455,18 +1540,35 @@ impl eframe::App for Drawer {
             {
                 self.hide(ctx);
             }
-            if self.preferences.pinned
-                && let Some(position) =
-                    ctx.input(|i| i.viewport().outer_rect.map(|r| [r.min.x, r.min.y]))
+            if (self.preferences.pinned || self.preferences.windowed)
+                && let Some((position, size)) = ctx.input(|i| {
+                    let viewport = i.viewport();
+                    if viewport.maximized == Some(true) || viewport.minimized == Some(true) {
+                        return None;
+                    }
+                    Some((
+                        viewport.outer_rect?.min.into(),
+                        viewport.inner_rect?.size().into(),
+                    ))
+                })
             {
-                if self.last_position != Some(position) {
+                if self.last_position != Some(position) || self.last_size != Some(size) {
                     self.last_position = Some(position);
+                    self.last_size = Some(size);
                     self.position_changed = Instant::now();
-                } else if self.position_changed.elapsed() > Duration::from_millis(700)
-                    && self.preferences.window_position != Some(position)
-                {
-                    self.preferences.window_position = Some(position);
-                    self.persist();
+                } else if self.position_changed.elapsed() > Duration::from_millis(700) {
+                    if self.preferences.windowed {
+                        if self.preferences.standard_window_position != Some(position)
+                            || self.preferences.standard_window_size != Some(size)
+                        {
+                            self.preferences.standard_window_position = Some(position);
+                            self.preferences.standard_window_size = Some(size);
+                            self.persist();
+                        }
+                    } else if self.preferences.window_position != Some(position) {
+                        self.preferences.window_position = Some(position);
+                        self.persist();
+                    }
                 }
             }
         }
@@ -1496,6 +1598,7 @@ impl eframe::App for Drawer {
                             .clicked()
                         {
                             self.collapsed = false;
+                            self.position_checked = false;
                             ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(
                                 WIDTH, HEIGHT,
                             )));
@@ -1529,61 +1632,80 @@ impl eframe::App for Drawer {
                 ui.add_space(7.);
                 ui.separator();
                 ui.add_space(5.);
-                let task_height = if snapshot.jobs.is_empty() { 56. } else { 132. };
-                egui::ScrollArea::vertical()
-                    .id_salt("drawer-preparation")
-                    .max_height((ui.available_height() - task_height).max(0.))
-                    .min_scrolled_height(0.)
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        self.device_rows(ui, &snapshot);
-                        ui.add_space(6.);
-                        self.drop_zone(ui, &snapshot);
+                if self.preferences.windowed && ui.available_width() >= 760. {
+                    ui.columns(2, |columns| {
+                        let height = columns[0].available_height().max(0.);
+                        self.preparation_ui(&mut columns[0], &snapshot, height);
+                        self.installation_tasks(&mut columns[1], &snapshot);
                     });
-                ui.add_space(6.);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("安装任务").strong());
-                    let count = snapshot.jobs.iter().filter(|j| j.stage.active()).count();
-                    if count > 0 {
-                        ui.label(
-                            RichText::new(format!("{count} 项进行中"))
-                                .small()
-                                .color(positive_text(ui)),
-                        );
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add(egui::Button::new("清除已结束").frame(false))
-                            .clicked()
-                        {
-                            self.backend.clear_finished();
-                        }
-                    });
-                });
-                let remaining = ui.available_height().max(0.);
-                egui::ScrollArea::vertical()
-                    .id_salt("jobs")
-                    .max_height(remaining)
-                    .min_scrolled_height(0.)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        if snapshot.jobs.is_empty() {
-                            let text_height = ui.text_style_height(&egui::TextStyle::Small);
-                            ui.add_space(((remaining - text_height) / 2.).max(0.));
-                            ui.vertical_centered(|ui| {
-                                ui.label(
-                                    RichText::new("安装结果会显示在这里")
-                                        .small()
-                                        .color(secondary_text(ui)),
-                                );
-                            });
-                        }
-                        for job in &snapshot.jobs {
-                            self.job_row(ui, job);
-                        }
-                    });
+                } else {
+                    let task_height = if snapshot.jobs.is_empty() { 56. } else { 132. };
+                    let height = (ui.available_height() - task_height).max(0.);
+                    self.preparation_ui(ui, &snapshot, height);
+                    ui.add_space(6.);
+                    self.installation_tasks(ui, &snapshot);
+                }
             });
         self.dialogs(&ctx, &snapshot);
+    }
+}
+
+impl Drawer {
+    fn preparation_ui(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot, height: f32) {
+        egui::ScrollArea::vertical()
+            .id_salt("drawer-preparation")
+            .max_height(height)
+            .min_scrolled_height(0.)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                self.device_rows(ui, snapshot);
+                ui.add_space(6.);
+                self.drop_zone(ui, snapshot);
+            });
+    }
+
+    fn installation_tasks(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("安装任务").strong());
+            let count = snapshot.jobs.iter().filter(|j| j.stage.active()).count();
+            if count > 0 {
+                ui.label(
+                    RichText::new(format!("{count} 项进行中"))
+                        .small()
+                        .color(positive_text(ui)),
+                );
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add(egui::Button::new("清除已结束").frame(false))
+                    .clicked()
+                {
+                    self.backend.clear_finished();
+                }
+            });
+        });
+        let remaining = ui.available_height().max(0.);
+        egui::ScrollArea::vertical()
+            .id_salt("jobs")
+            .max_height(remaining)
+            .min_scrolled_height(0.)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if snapshot.jobs.is_empty() {
+                    let text_height = ui.text_style_height(&egui::TextStyle::Small);
+                    ui.add_space(((remaining - text_height) / 2.).max(0.));
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new("安装结果会显示在这里")
+                                .small()
+                                .color(secondary_text(ui)),
+                        );
+                    });
+                }
+                for job in &snapshot.jobs {
+                    self.job_row(ui, job);
+                }
+            });
     }
 }
 
@@ -1609,9 +1731,39 @@ fn window_level(settings: &Settings) -> WindowLevel {
         WindowLevel::Normal
     }
 }
-fn pin_button(ui: &mut egui::Ui, pinned: bool) -> egui::Response {
+fn window_mode_button(ui: &mut egui::Ui, windowed: bool) -> egui::Response {
+    let label = if windowed {
+        "切换抽屉模式"
+    } else {
+        "切换窗口模式"
+    };
+    let response = ui.add_sized([32., 32.], egui::Button::new("").selected(windowed));
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), windowed, label)
+    });
+    let color = ui.visuals().text_color();
+    let origin = response.rect.center() - Vec2::splat(9.);
+    let rect = egui::Rect::from_min_size(origin, Vec2::new(18., 16.));
+    ui.painter()
+        .rect_stroke(rect, 2., Stroke::new(1.5, color), egui::StrokeKind::Inside);
+    ui.painter().line_segment(
+        [origin + Vec2::new(1., 5.), origin + Vec2::new(17., 5.)],
+        Stroke::new(1.5, color),
+    );
+    if windowed {
+        ui.painter().line_segment(
+            [origin + Vec2::new(12., 6.), origin + Vec2::new(12., 15.)],
+            Stroke::new(1.5, color),
+        );
+    }
+    response.on_hover_text(label)
+}
+
+fn pin_button(ui: &mut egui::Ui, pinned: bool, windowed: bool) -> egui::Response {
     let label = if pinned {
         "取消固定"
+    } else if windowed {
+        "固定窗口"
     } else {
         "固定抽屉"
     };
@@ -1646,7 +1798,9 @@ fn pin_button(ui: &mut egui::Ui, pinned: bool) -> egui::Response {
         [origin + Vec2::new(10., 13.), origin + Vec2::new(10., 19.)],
         Stroke::new(1.5, color),
     );
-    response.on_hover_text(if pinned {
+    response.on_hover_text(if pinned && windowed {
+        "取消置顶，窗口保持打开"
+    } else if pinned {
         "取消固定，点击外部时自动收起"
     } else {
         "固定并置顶，点击外部时保持展开"

@@ -160,7 +160,11 @@ pub fn monitor_work_area() -> RECT {
     }
 }
 
-pub fn clamp_position(position: [f32; 2], size: [f32; 2], dpi: f32) -> Result<[f32; 2]> {
+pub fn fit_window_to_work_area(
+    position: [f32; 2],
+    size: [f32; 2],
+    dpi: f32,
+) -> Result<([f32; 2], [f32; 2])> {
     unsafe {
         let point = windows_sys::Win32::Foundation::POINT {
             x: (position[0] * dpi) as i32,
@@ -180,9 +184,14 @@ pub fn clamp_position(position: [f32; 2], size: [f32; 2], dpi: f32) -> Result<[f
         );
         let left = info.rcWork.left as f32 / dpi;
         let top = info.rcWork.top as f32 / dpi;
-        Ok([
+        let size = [
+            size[0].min((info.rcWork.right - info.rcWork.left) as f32 / dpi),
+            size[1].min((info.rcWork.bottom - info.rcWork.top) as f32 / dpi),
+        ];
+        let position = [
             position[0].clamp(left, (info.rcWork.right as f32 / dpi - size[0]).max(left)),
             position[1].clamp(top, (info.rcWork.bottom as f32 / dpi - size[1]).max(top)),
-        ])
+        ];
+        Ok((position, size))
     }
 }
