@@ -18,7 +18,7 @@ use winit::platform::windows::WindowExtWindows;
 
 const WIDTH: f32 = 440.;
 const HEIGHT: f32 = 780.;
-const WINDOW_SIZE: [f32; 2] = [960., 780.];
+const WINDOW_SIZE: [f32; 2] = [1080., 800.];
 const GREEN: Color32 = Color32::from_rgb(37, 173, 115);
 const PRIMARY_GREEN: Color32 = Color32::from_rgb(20, 133, 84);
 
@@ -422,12 +422,7 @@ impl Drawer {
                     self.set_window_mode(ui.ctx(), !self.preferences.windowed);
                 }
                 if pin_button(ui, self.preferences.pinned, self.preferences.windowed).clicked() {
-                    self.preferences.pinned = !self.preferences.pinned;
-                    ui.ctx()
-                        .send_viewport_cmd(ViewportCommand::WindowLevel(window_level(
-                            &self.preferences,
-                        )));
-                    self.persist();
+                    self.toggle_pin(ui.ctx());
                 }
             });
         });
@@ -443,11 +438,19 @@ impl Drawer {
         }
     }
 
-    fn device_rows(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) {
+    fn toggle_pin(&mut self, ctx: &egui::Context) {
+        self.preferences.pinned = !self.preferences.pinned;
+        ctx.send_viewport_cmd(ViewportCommand::WindowLevel(window_level(
+            &self.preferences,
+        )));
+        self.persist();
+    }
+
+    fn device_rows(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot, sidebar: bool) {
         let selected = snapshot.devices.iter().filter(|d| d.selected).count();
         ui.horizontal(|ui| {
-            ui.label(RichText::new("安装设备").strong());
-            if selected > 0 {
+            ui.label(RichText::new(if sidebar { "设备" } else { "安装设备" }).strong());
+            if selected > 0 && !sidebar {
                 ui.label(
                     RichText::new(format!("已选 {selected} 台"))
                         .small()
@@ -455,7 +458,7 @@ impl Drawer {
                 );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(egui::Button::new("连接设备").frame(false)).clicked() {
+                if !sidebar && ui.add(egui::Button::new("连接设备").frame(false)).clicked() {
                     self.dialog = Some(connect_dialog());
                 }
                 if ui
@@ -473,6 +476,23 @@ impl Drawer {
                 }
             });
         });
+        if sidebar {
+            ui.label(
+                RichText::new(format!(
+                    "{} 台设备 · 已选 {selected} 台",
+                    snapshot.devices.len()
+                ))
+                .small()
+                .color(secondary_text(ui)),
+            );
+            if ui
+                .add_sized([ui.available_width(), 36.], egui::Button::new("连接设备"))
+                .clicked()
+            {
+                self.dialog = Some(connect_dialog());
+            }
+            ui.add_space(8.);
+        }
         if snapshot.devices.is_empty() {
             card(ui, self.preferences.dark, |ui| {
                 ui.add_space(8.);
@@ -489,8 +509,8 @@ impl Drawer {
         } else {
             egui::ScrollArea::vertical()
                 .id_salt("devices")
-                .max_height(if self.preferences.windowed {
-                    320.
+                .max_height(if sidebar {
+                    ui.available_height().max(0.)
                 } else {
                     224.
                 })
@@ -498,7 +518,7 @@ impl Drawer {
                     for device in &snapshot.devices {
                         ui.horizontal(|ui| {
                             let online = device.status == DeviceStatus::Online;
-                            let row_width = ui.available_width() - 44.;
+                            let row_width = ui.available_width() - if sidebar { 0. } else { 44. };
                             let status = format!(
                                 "{} · {}{}",
                                 device.transport,
@@ -530,45 +550,91 @@ impl Drawer {
                                     },
                                 ));
                             let selection = ui
-                                .add_enabled_ui(device.selectable(), |ui| {
+                                .add_enabled_ui(device.selectable() || sidebar, |ui| {
                                     frame
                                         .show(ui, |ui| {
                                             ui.set_width(row_width - 20.);
                                             ui.set_min_height(42.);
-                                            ui.horizontal(|ui| {
-                                                ui.label(
-                                                    RichText::new(if device.selected {
-                                                        "●"
-                                                    } else {
-                                                        "○"
-                                                    })
-                                                    .color(if device.selected {
-                                                        GREEN
-                                                    } else {
-                                                        secondary_text(ui)
-                                                    }),
-                                                );
-                                                ui.vertical(|ui| {
-                                                    ui.add(
-                                                        egui::Label::new(
-                                                            RichText::new(&device.name).size(14.),
-                                                        )
-                                                        .truncate(),
-                                                    )
-                                                    .on_hover_text(&device.name);
-                                                    ui.add(
-                                                        egui::Label::new(
-                                                            RichText::new(status)
-                                                                .small()
-                                                                .color(secondary_text(ui)),
-                                                        )
-                                                        .truncate(),
+                                            ui.vertical(|ui| {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(
+                                                        RichText::new(if device.selected {
+                                                            "●"
+                                                        } else {
+                                                            "○"
+                                                        })
+                                                        .color(if device.selected {
+                                                            GREEN
+                                                        } else {
+                                                            secondary_text(ui)
+                                                        }),
                                                     );
+                                                    ui.vertical(|ui| {
+                                                        if sidebar {
+                                                            ui.set_width((row_width - 40.).max(1.));
+                                                        }
+                                                        let name = egui::Label::new(
+                                                            RichText::new(&device.name)
+                                                                .size(14.)
+                                                                .strong(),
+                                                        );
+                                                        ui.add(if sidebar {
+                                                            name.wrap()
+                                                        } else {
+                                                            name.truncate()
+                                                        })
+                                                        .on_hover_text(&device.name);
+                                                        if !sidebar {
+                                                            ui.add(
+                                                                egui::Label::new(
+                                                                    RichText::new(&status)
+                                                                        .small()
+                                                                        .color(secondary_text(ui)),
+                                                                )
+                                                                .truncate(),
+                                                            );
+                                                        }
+                                                    });
                                                 });
+                                                if sidebar {
+                                                    ui.horizontal(|ui| {
+                                                        ui.with_layout(
+                                                            egui::Layout::right_to_left(
+                                                                egui::Align::Center,
+                                                            ),
+                                                            |ui| {
+                                                                if ui
+                                                                    .add(
+                                                                        egui::Button::new("详情")
+                                                                            .small()
+                                                                            .frame(false),
+                                                                    )
+                                                                    .clicked()
+                                                                {
+                                                                    self.device_detail(device);
+                                                                }
+                                                                ui.add(
+                                                                    egui::Label::new(
+                                                                        RichText::new(&status)
+                                                                            .small()
+                                                                            .color(secondary_text(
+                                                                                ui,
+                                                                            )),
+                                                                    )
+                                                                    .truncate(),
+                                                                );
+                                                            },
+                                                        );
+                                                    });
+                                                }
                                             });
                                         })
                                         .response
-                                        .interact(egui::Sense::click())
+                                        .interact(if device.selectable() {
+                                            egui::Sense::click()
+                                        } else {
+                                            egui::Sense::hover()
+                                        })
                                 })
                                 .inner;
                             selection.widget_info(|| {
@@ -589,26 +655,31 @@ impl Drawer {
                             {
                                 self.backend.toggle(&device.id);
                             }
-                            if ui
-                                .add(egui::Button::new("详情").small().frame(false))
-                                .on_hover_text("设备详情与连接操作")
-                                .clicked()
+                            if !sidebar
+                                && ui
+                                    .add(egui::Button::new("详情").small().frame(false))
+                                    .on_hover_text("设备详情与连接操作")
+                                    .clicked()
                             {
-                                self.dialog = Some(Dialog::Detail {
-                                    device: device.clone(),
-                                    alias: self
-                                        .storage
-                                        .settings()
-                                        .aliases
-                                        .get(&device.serial)
-                                        .cloned()
-                                        .unwrap_or_default(),
-                                });
+                                self.device_detail(device);
                             }
                         });
                     }
                 });
         }
+    }
+
+    fn device_detail(&mut self, device: &Device) {
+        self.dialog = Some(Dialog::Detail {
+            device: device.clone(),
+            alias: self
+                .storage
+                .settings()
+                .aliases
+                .get(&device.serial)
+                .cloned()
+                .unwrap_or_default(),
+        });
     }
 
     fn drop_zone(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) {
@@ -649,7 +720,7 @@ impl Drawer {
                     ui.add_space(4.);
                     egui::ScrollArea::vertical()
                         .id_salt("prepared-apks")
-                        .max_height(88.)
+                        .max_height(if self.preferences.windowed { 120. } else { 88. })
                         .min_scrolled_height(0.)
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
@@ -666,7 +737,8 @@ impl Drawer {
                                             )
                                             .size(14.),
                                         )
-                                        .truncate(),
+                                        .truncate()
+                                        .halign(egui::Align::Min),
                                     )
                                     .on_hover_text(path.display().to_string());
                                     if ui
@@ -729,94 +801,167 @@ impl Drawer {
                         );
                     }
                 } else {
-                    ui.vertical_centered(|ui| {
-                        let (rect, _) =
-                            ui.allocate_exact_size(Vec2::new(38., 40.), egui::Sense::hover());
-                        let paper = rect.shrink(5.);
-                        ui.painter().rect(
-                            paper,
-                            4.,
-                            GREEN.gamma_multiply(0.09),
-                            Stroke::new(1.5, GREEN),
-                            egui::StrokeKind::Inside,
-                        );
-                        ui.painter().text(
-                            paper.center(),
-                            egui::Align2::CENTER_CENTER,
-                            "APK",
-                            FontId::proportional(10.),
-                            GREEN,
-                        );
-                        ui.label(
-                            RichText::new(if hovering {
-                                "松开以准备安装包"
-                            } else {
-                                "把 APK 拖到这里"
-                            })
-                            .size(18.)
-                            .strong(),
-                        );
-                        ui.label(
-                            RichText::new("支持批量拖入 · 准备后点击安装")
-                                .small()
-                                .color(secondary_text(ui)),
-                        );
-                    });
+                    if self.preferences.windowed {
+                        ui.add_space(8.);
+                        ui.horizontal(|ui| {
+                            apk_symbol(ui);
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new(if hovering {
+                                        "松开以准备安装包"
+                                    } else {
+                                        "拖入 APK，或选择安装包"
+                                    })
+                                    .size(18.)
+                                    .strong(),
+                                );
+                                ui.label(
+                                    RichText::new("支持批量及拆分 APK，准备完成后点击开始安装")
+                                        .small()
+                                        .color(secondary_text(ui)),
+                                );
+                            });
+                        });
+                        ui.add_space(8.);
+                    } else {
+                        ui.vertical_centered(|ui| {
+                            apk_symbol(ui);
+                            ui.label(
+                                RichText::new(if hovering {
+                                    "松开以准备安装包"
+                                } else {
+                                    "把 APK 拖到这里"
+                                })
+                                .size(18.)
+                                .strong(),
+                            );
+                            ui.label(
+                                RichText::new("支持批量拖入 · 准备后点击安装")
+                                    .small()
+                                    .color(secondary_text(ui)),
+                            );
+                        });
+                    }
                 }
                 ui.add_space(8.);
+                if self.preferences.windowed && ui.available_width() >= 520. {
+                    ui.horizontal(|ui| {
+                        self.apk_picker_button(ui, snapshot, false, 120.);
+                        self.apk_picker_button(ui, snapshot, true, 144.);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            self.install_prepared_button(ui, snapshot, selected, 180.);
+                        });
+                    });
+                    return;
+                }
                 ui.columns(2, |columns| {
                     let first_width = columns[0].available_width();
-                    if columns[0]
-                        .add_sized(
-                            [first_width, 34.],
-                            egui::Button::new(if snapshot.preparation.is_some() {
-                                "更换 APK"
-                            } else {
-                                "选择 APK"
-                            }),
-                        )
-                        .clicked()
-                    {
-                        self.file_picker = Some(false);
-                        columns[0].ctx().request_repaint();
-                    }
+                    self.apk_picker_button(&mut columns[0], snapshot, false, first_width);
                     let second_width = columns[1].available_width();
-                    if columns[1]
-                        .add_sized([second_width, 34.], egui::Button::new("选择拆分 APK"))
-                        .clicked()
-                    {
-                        self.file_picker = Some(true);
-                        columns[1].ctx().request_repaint();
-                    }
+                    self.apk_picker_button(&mut columns[1], snapshot, true, second_width);
                 });
-                if snapshot.preparation.is_none() {
+                if snapshot.preparation.is_none() && !self.preferences.windowed {
                     return;
                 }
                 ui.add_space(8.);
-                let ready = snapshot
-                    .preparation
-                    .as_ref()
-                    .is_some_and(|p| matches!(p.state, PreparationState::Ready(_)));
-                let label = if selected > 0 {
-                    format!("安装到 {selected} 台设备")
-                } else {
-                    "安装 · 请先选择设备".into()
-                };
-                let clicked = ui
-                    .add_enabled_ui(ready && selected > 0, |ui| {
-                        ui.add_sized([ui.available_width(), 40.], primary_button(&label))
-                    })
-                    .inner
-                    .clicked();
-                if clicked && let Some(preparation) = &snapshot.preparation {
-                    self.backend
-                        .install_prepared(preparation.revision, self.preferences.test_packages);
-                    self.opened = Instant::now();
-                }
+                self.install_prepared_button(ui, snapshot, selected, ui.available_width());
             });
     }
 
+    fn apk_picker_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &Snapshot,
+        split: bool,
+        width: f32,
+    ) {
+        let label = if split {
+            "选择拆分 APK"
+        } else if snapshot.preparation.is_some() {
+            "更换 APK"
+        } else {
+            "选择 APK"
+        };
+        if ui
+            .add_sized([width, 36.], egui::Button::new(label))
+            .clicked()
+        {
+            self.file_picker = Some(split);
+            ui.ctx().request_repaint();
+        }
+    }
+
+    fn install_prepared_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        snapshot: &Snapshot,
+        selected: usize,
+        width: f32,
+    ) {
+        let ready = snapshot
+            .preparation
+            .as_ref()
+            .is_some_and(|p| matches!(p.state, PreparationState::Ready(_)));
+        let label = if selected > 0 && snapshot.preparation.is_some() {
+            format!("安装到 {selected} 台设备")
+        } else if self.preferences.windowed {
+            "开始安装".into()
+        } else {
+            "安装 · 请先选择设备".into()
+        };
+        let clicked = ui
+            .add_enabled_ui(ready && selected > 0, |ui| {
+                ui.add_sized([width, 40.], primary_button(&label))
+            })
+            .inner
+            .on_hover_text(if selected == 0 {
+                "先在设备列表选择安装目标"
+            } else if !ready {
+                "先添加并检查安装包"
+            } else {
+                "安装到选中的设备；离线无线设备会先尝试重连"
+            })
+            .clicked();
+        if clicked && let Some(preparation) = &snapshot.preparation {
+            self.backend
+                .install_prepared(preparation.revision, self.preferences.test_packages);
+            self.opened = Instant::now();
+        }
+    }
+
     fn footer(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) {
+        if self.preferences.windowed {
+            ui.separator();
+            ui.horizontal(|ui| {
+                device_summary(ui, snapshot);
+                ui.label(
+                    RichText::new(format!(
+                        "已选 {} 台",
+                        snapshot.devices.iter().filter(|d| d.selected).count()
+                    ))
+                    .small()
+                    .color(secondary_text(ui)),
+                );
+                self.notice_preview(ui, snapshot);
+            });
+            return;
+        }
+        self.notice_preview(ui, snapshot);
+        ui.separator();
+        ui.horizontal(|ui| {
+            device_summary(ui, snapshot);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(egui::Button::new("设置").frame(false)).clicked() {
+                    self.dialog = Some(Dialog::Settings);
+                }
+                if ui.add(egui::Button::new("设备管理").frame(false)).clicked() {
+                    self.dialog = Some(Dialog::Devices);
+                }
+            });
+        });
+    }
+
+    fn notice_preview(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) {
         if !snapshot.notice.is_empty() {
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -852,77 +997,52 @@ impl Drawer {
                 });
             });
         }
-        ui.separator();
-        ui.horizontal(|ui| {
-            let online = snapshot
-                .devices
-                .iter()
-                .filter(|d| d.status == DeviceStatus::Online)
-                .count();
-            ui.label(
-                RichText::new(format!("● {online} 台在线"))
-                    .small()
-                    .color(if online > 0 {
-                        positive_text(ui)
-                    } else {
-                        secondary_text(ui)
-                    }),
-            );
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(egui::Button::new("设置").frame(false)).clicked() {
-                    self.dialog = Some(Dialog::Settings);
-                }
-                if ui.add(egui::Button::new("设备管理").frame(false)).clicked() {
-                    self.dialog = Some(Dialog::Devices);
-                }
-            });
-        });
     }
 
-    fn job_row(&mut self, ui: &mut egui::Ui, job: &Job) {
+    fn job_row(&mut self, ui: &mut egui::Ui, job: &Job, table: bool) {
         card(ui, self.preferences.dark, |ui| {
-            ui.horizontal(|ui| {
-                let label_width = (ui.available_width() - 52.).max(1.);
-                ui.allocate_ui_with_layout(
-                    Vec2::new(label_width, 32.),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.add(
-                            egui::Label::new(RichText::new(&job.title).strong().size(14.))
-                                .truncate(),
-                        )
-                        .on_hover_text(&job.title);
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(&job.device_name)
-                                    .small()
-                                    .color(secondary_text(ui)),
-                            )
-                            .truncate(),
-                        )
-                        .on_hover_text(&job.device_name);
-                    },
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if matches!(
-                        job.stage,
-                        JobStage::Queued
-                            | JobStage::Connecting
-                            | JobStage::Preparing
-                            | JobStage::Transferring
-                    ) {
-                        if ui.small_button("取消").clicked() {
-                            self.backend.cancel(job.id);
-                        }
-                    } else if matches!(
-                        job.stage,
-                        JobStage::Failed | JobStage::Canceled | JobStage::Unknown
-                    ) && ui.small_button("重试").clicked()
-                    {
-                        self.backend.retry_job(job.id);
-                    }
+            if table {
+                let widths = task_column_widths(ui.available_width(), ui.spacing().item_spacing.x);
+                ui.horizontal(|ui| {
+                    task_cell(ui, widths[0], |ui| {
+                        ui.add(egui::Label::new(RichText::new(&job.title).strong()).truncate())
+                            .on_hover_text(&job.title);
+                    });
+                    task_cell(ui, widths[1], |ui| {
+                        ui.add(egui::Label::new(&job.device_name).truncate())
+                            .on_hover_text(&job.device_name);
+                    });
+                    task_cell(ui, widths[2], |ui| self.job_status(ui, job));
+                    task_cell(ui, widths[3], |ui| self.job_action(ui, job));
                 });
-            });
+            } else {
+                ui.horizontal(|ui| {
+                    let label_width = (ui.available_width() - 52.).max(1.);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(label_width, 32.),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.add(
+                                egui::Label::new(RichText::new(&job.title).strong().size(14.))
+                                    .truncate(),
+                            )
+                            .on_hover_text(&job.title);
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&job.device_name)
+                                        .small()
+                                        .color(secondary_text(ui)),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(&job.device_name);
+                        },
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        self.job_action(ui, job);
+                    });
+                });
+            }
             if job.stage == JobStage::Transferring {
                 let fraction = if job.total == 0 {
                     0.
@@ -945,27 +1065,8 @@ impl Drawer {
                     .small()
                     .color(secondary_text(ui)),
                 );
-            } else {
-                ui.horizontal(|ui| {
-                    if matches!(
-                        job.stage,
-                        JobStage::Connecting | JobStage::Preparing | JobStage::Installing
-                    ) {
-                        ui.add(egui::Spinner::new().size(12.));
-                    }
-                    let color = match job.stage {
-                        JobStage::Succeeded => positive_text(ui),
-                        JobStage::Failed | JobStage::Unknown => {
-                            if self.preferences.dark {
-                                Color32::from_rgb(214, 105, 82)
-                            } else {
-                                Color32::from_rgb(181, 76, 54)
-                            }
-                        }
-                        _ => secondary_text(ui),
-                    };
-                    ui.label(RichText::new(job.stage.label()).small().color(color));
-                });
+            } else if !table {
+                self.job_status(ui, job);
             }
             if !job.detail.is_empty() {
                 egui::CollapsingHeader::new("查看结果详情")
@@ -978,6 +1079,43 @@ impl Drawer {
                         }
                     });
             }
+        });
+    }
+
+    fn job_action(&mut self, ui: &mut egui::Ui, job: &Job) {
+        if matches!(
+            job.stage,
+            JobStage::Queued | JobStage::Connecting | JobStage::Preparing | JobStage::Transferring
+        ) {
+            if ui.small_button("取消").clicked() {
+                self.backend.cancel(job.id);
+            }
+        } else if matches!(
+            job.stage,
+            JobStage::Failed | JobStage::Canceled | JobStage::Unknown
+        ) && ui.small_button("重试").clicked()
+        {
+            self.backend.retry_job(job.id);
+        }
+    }
+
+    fn job_status(&self, ui: &mut egui::Ui, job: &Job) {
+        ui.horizontal(|ui| {
+            if matches!(
+                job.stage,
+                JobStage::Connecting | JobStage::Preparing | JobStage::Installing
+            ) {
+                ui.add(egui::Spinner::new().size(12.));
+            }
+            let color = match job.stage {
+                JobStage::Succeeded => positive_text(ui),
+                JobStage::Failed | JobStage::Unknown => ui.visuals().error_fg_color,
+                _ => secondary_text(ui),
+            };
+            ui.add(
+                egui::Label::new(RichText::new(job.stage.label()).small().color(color)).truncate(),
+            )
+            .on_hover_text(job.stage.label());
         });
     }
 
@@ -1621,6 +1759,11 @@ impl eframe::App for Drawer {
             return;
         }
         let snapshot = self.backend.snapshot();
+        if self.preferences.windowed {
+            self.window_ui(ui, &snapshot);
+            self.dialogs(&ctx, &snapshot);
+            return;
+        }
         egui::Frame::new()
             .fill(ui.visuals().panel_fill)
             .inner_margin(16)
@@ -1632,25 +1775,69 @@ impl eframe::App for Drawer {
                 ui.add_space(7.);
                 ui.separator();
                 ui.add_space(5.);
-                if self.preferences.windowed && ui.available_width() >= 760. {
-                    ui.columns(2, |columns| {
-                        let height = columns[0].available_height().max(0.);
-                        self.preparation_ui(&mut columns[0], &snapshot, height);
-                        self.installation_tasks(&mut columns[1], &snapshot);
-                    });
-                } else {
-                    let task_height = if snapshot.jobs.is_empty() { 56. } else { 132. };
-                    let height = (ui.available_height() - task_height).max(0.);
-                    self.preparation_ui(ui, &snapshot, height);
-                    ui.add_space(6.);
-                    self.installation_tasks(ui, &snapshot);
-                }
+                let task_height = if snapshot.jobs.is_empty() { 56. } else { 132. };
+                let height = (ui.available_height() - task_height).max(0.);
+                self.preparation_ui(ui, &snapshot, height);
+                ui.add_space(6.);
+                self.installation_tasks(ui, &snapshot);
             });
         self.dialogs(&ctx, &snapshot);
     }
 }
 
 impl Drawer {
+    fn window_ui(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) {
+        egui::Frame::new().fill(ui.visuals().panel_fill).show(ui, |ui| {
+            egui::Panel::bottom("window-status").frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 8))).show(ui, |ui| self.footer(ui, snapshot));
+            egui::Panel::top("window-toolbar").frame(egui::Frame::new().fill(ui.visuals().window_fill).inner_margin(egui::Margin::symmetric(20, 8))).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Image::new(&self.icon).fit_to_exact_size(Vec2::splat(28.)));
+                    ui.label(RichText::new("安装工作台").size(18.).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if window_mode_button(ui, true).clicked() { self.set_window_mode(ui.ctx(), false); }
+                        if pin_button(ui, self.preferences.pinned, true).clicked() { self.toggle_pin(ui.ctx()); }
+                        ui.separator();
+                        if ui.button("设置").clicked() { self.dialog = Some(Dialog::Settings); }
+                        if ui.ctx().content_rect().width() < 760. && ui.button("设备管理").clicked() { self.dialog = Some(Dialog::Devices); }
+                    });
+                });
+            });
+            let sidebar = ui.available_width() >= 760.;
+            if sidebar {
+                egui::Panel::left("window-devices").default_size(272.).min_size(228.).max_size(360.).resizable(true)
+                    .frame(egui::Frame::new().fill(ui.visuals().window_fill).inner_margin(16)).show(ui, |ui| {
+                        egui::Panel::bottom("device-sidebar-footer").frame(egui::Frame::NONE).show(ui, |ui| {
+                            ui.separator();
+                            ui.label(RichText::new("单击选择，可同时选择多台\n离线无线设备在安装前自动重连").small().color(secondary_text(ui)));
+                            if ui.add_sized([ui.available_width(), 36.], egui::Button::new("设备管理")).clicked() { self.dialog = Some(Dialog::Devices); }
+                        });
+                        self.device_rows(ui, snapshot, true);
+                    });
+            }
+            egui::Frame::new().inner_margin(20).show(ui, |ui| {
+                let reserved = (ui.available_height() * 0.4).max(120.);
+                egui::ScrollArea::vertical().id_salt("window-preparation").max_height((ui.available_height() - reserved).max(0.)).min_scrolled_height(0.).auto_shrink([false, true]).show(ui, |ui| {
+                    if !sidebar {
+                        let selected = snapshot.devices.iter().filter(|d| d.selected).count();
+                        egui::CollapsingHeader::new(format!("选择设备 · 已选 {selected} 台")).id_salt("window-device-selector").show(ui, |ui| self.device_rows(ui, snapshot, false));
+                        ui.add_space(8.);
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("安装包").size(18.).strong());
+                        let selected = snapshot.devices.iter().filter(|d| d.selected).count();
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(if selected == 0 { "请先选择目标设备".into() } else { format!("安装目标：{selected} 台设备") }).small().color(secondary_text(ui)));
+                        });
+                    });
+                    ui.add_space(8.);
+                    self.drop_zone(ui, snapshot);
+                });
+                ui.add_space(20.);
+                self.installation_tasks(ui, snapshot);
+            });
+        });
+    }
+
     fn preparation_ui(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot, height: f32) {
         egui::ScrollArea::vertical()
             .id_salt("drawer-preparation")
@@ -1658,15 +1845,20 @@ impl Drawer {
             .min_scrolled_height(0.)
             .auto_shrink([false, true])
             .show(ui, |ui| {
-                self.device_rows(ui, snapshot);
+                self.device_rows(ui, snapshot, false);
                 ui.add_space(6.);
                 self.drop_zone(ui, snapshot);
             });
     }
 
     fn installation_tasks(&mut self, ui: &mut egui::Ui, snapshot: &Snapshot) {
+        let table = self.preferences.windowed && ui.available_width() >= 540.;
         ui.horizontal(|ui| {
-            ui.label(RichText::new("安装任务").strong());
+            ui.label(
+                RichText::new("安装任务")
+                    .size(if self.preferences.windowed { 18. } else { 15. })
+                    .strong(),
+            );
             let count = snapshot.jobs.iter().filter(|j| j.stage.active()).count();
             if count > 0 {
                 ui.label(
@@ -1684,6 +1876,27 @@ impl Drawer {
                 }
             });
         });
+        if table {
+            egui::Frame::new()
+                .fill(ui.visuals().window_fill)
+                .inner_margin(10)
+                .corner_radius(6)
+                .show(ui, |ui| {
+                    let widths =
+                        task_column_widths(ui.available_width(), ui.spacing().item_spacing.x);
+                    ui.horizontal(|ui| {
+                        for (width, label) in
+                            widths
+                                .into_iter()
+                                .zip(["安装包", "目标设备", "状态", "操作"])
+                        {
+                            task_cell(ui, width, |ui| {
+                                ui.label(RichText::new(label).small().color(secondary_text(ui)));
+                            });
+                        }
+                    });
+                });
+        }
         let remaining = ui.available_height().max(0.);
         egui::ScrollArea::vertical()
             .id_salt("jobs")
@@ -1693,17 +1906,33 @@ impl Drawer {
             .show(ui, |ui| {
                 if snapshot.jobs.is_empty() {
                     let text_height = ui.text_style_height(&egui::TextStyle::Small);
-                    ui.add_space(((remaining - text_height) / 2.).max(0.));
+                    ui.add_space(
+                        ((remaining
+                            - if self.preferences.windowed {
+                                72.
+                            } else {
+                                text_height
+                            })
+                            / 2.)
+                            .max(0.),
+                    );
                     ui.vertical_centered(|ui| {
+                        if self.preferences.windowed {
+                            ui.label(RichText::new("暂无安装任务").size(16.).strong());
+                        }
                         ui.label(
-                            RichText::new("安装结果会显示在这里")
-                                .small()
-                                .color(secondary_text(ui)),
+                            RichText::new(if self.preferences.windowed {
+                                "添加 APK 并点击开始安装，进度和结果会显示在这里"
+                            } else {
+                                "安装结果会显示在这里"
+                            })
+                            .small()
+                            .color(secondary_text(ui)),
                         );
                     });
                 }
                 for job in &snapshot.jobs {
-                    self.job_row(ui, job);
+                    self.job_row(ui, job, table);
                 }
             });
     }
@@ -1719,6 +1948,59 @@ fn connect_dialog() -> Dialog {
         paired_id: String::new(),
     }
 }
+fn device_summary(ui: &mut egui::Ui, snapshot: &Snapshot) {
+    let online = snapshot
+        .devices
+        .iter()
+        .filter(|d| d.status == DeviceStatus::Online)
+        .count();
+    ui.label(
+        RichText::new(format!("● {online} 台在线"))
+            .small()
+            .color(if online > 0 {
+                positive_text(ui)
+            } else {
+                secondary_text(ui)
+            }),
+    );
+}
+
+fn apk_symbol(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(38., 40.), egui::Sense::hover());
+    let paper = rect.shrink(5.);
+    ui.painter().rect(
+        paper,
+        4.,
+        GREEN.gamma_multiply(0.09),
+        Stroke::new(1.5, GREEN),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().text(
+        paper.center(),
+        egui::Align2::CENTER_CENTER,
+        "APK",
+        FontId::proportional(10.),
+        GREEN,
+    );
+}
+
+fn task_column_widths(width: f32, spacing: f32) -> [f32; 4] {
+    let usable = (width - spacing * 3.).max(0.);
+    [usable * 0.4, usable * 0.24, usable * 0.24, usable * 0.12]
+}
+
+fn task_cell(ui: &mut egui::Ui, width: f32, content: impl FnOnce(&mut egui::Ui)) {
+    ui.allocate_ui_with_layout(
+        Vec2::new(width, 28.),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_width(width);
+            ui.set_min_height(28.);
+            content(ui);
+        },
+    );
+}
+
 fn primary_button(text: &str) -> egui::Button<'_> {
     egui::Button::new(RichText::new(text).color(Color32::WHITE))
         .fill(PRIMARY_GREEN)
