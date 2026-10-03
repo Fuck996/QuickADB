@@ -6,7 +6,7 @@ use quickadb::{
     storage::Storage,
 };
 use std::time::{Duration, Instant};
-use support::{DeviceOptions, DeviceServer, TempDirectory};
+use support::{DeviceOptions, DeviceServer, HeartbeatReply, TempDirectory};
 
 fn wait_for(backend: &Backend, condition: impl Fn(&quickadb::model::Snapshot) -> bool) {
     wait_for_timeout(backend, Duration::from_secs(6), condition);
@@ -281,6 +281,7 @@ fn real_transport_loss_marks_device_offline_and_preserves_the_reason() {
     );
     assert!(!snapshot.devices[0].detail.contains("locally"));
     assert!(snapshot.devices[0].selected);
+    assert!(snapshot.notice.contains("连接中断"));
     drop(backend);
 }
 
@@ -478,11 +479,11 @@ fn rejected_status_command_does_not_close_a_usable_connection() {
     let server = DeviceServer::start(DeviceOptions {
         features: "shell_v2,cmd,abb_exec",
         reject_heartbeat: true,
-        idle_timeout: Duration::from_secs(30),
+        idle_timeout: Duration::from_secs(50),
         ..Default::default()
     });
     let storage = Storage::open(directory.0.join("data")).expect("storage");
-    let backend = Backend::new(storage).expect("backend");
+    let backend = Backend::new(storage.clone()).expect("backend");
     backend.connect(Endpoint {
         host: "127.0.0.1".into(),
         port: server.port,
@@ -491,7 +492,8 @@ fn rejected_status_command_does_not_close_a_usable_connection() {
     wait_for(&backend, |s| {
         s.devices.iter().any(|d| d.status == DeviceStatus::Online)
     });
-    std::thread::sleep(Duration::from_secs(12));
+    backend.notify("需要保留的用户操作提示");
+    std::thread::sleep(Duration::from_secs(22));
     let snapshot = backend.snapshot();
     assert_eq!(
         snapshot.devices[0].status,
@@ -499,7 +501,10 @@ fn rejected_status_command_does_not_close_a_usable_connection() {
         "{:?}",
         snapshot.devices
     );
-    assert!(snapshot.devices[0].detail.contains("状态检查失败"));
+    assert!(snapshot.devices[0].detail.contains("后台连接检查未完成"));
+    assert_eq!(snapshot.notice, "需要保留的用户操作提示");
+    let log = std::fs::read_to_string(storage.directory.join("quickadb.log")).expect("log");
+    assert_eq!(log.matches("后台连接检查未完成").count(), 1);
     assert!(
         server
             .records
@@ -516,6 +521,74 @@ fn rejected_status_command_does_not_close_a_usable_connection() {
     wait_for(&backend, |s| s.jobs.len() == 1 && !s.jobs[0].stage.active());
     assert_eq!(backend.snapshot().jobs[0].stage, JobStage::Succeeded);
     assert_eq!(server.records.lock().expect("records").uploads, vec![bytes]);
+    drop(backend);
+}
+
+#[test]
+fn background_check_recovers_and_reports_a_new_failure_without_global_noise() {
+    let directory = TempDirectory::new();
+    let server = DeviceServer::start(DeviceOptions {
+        features: "shell_v2,cmd,abb_exec",
+        idle_timeout: Duration::from_secs(70),
+        heartbeat_replies: &[
+            HeartbeatReply::Rejected,
+            HeartbeatReply::Success,
+            HeartbeatReply::UnexpectedOutput,
+            HeartbeatReply::CloseAfterOutput,
+        ],
+        ..Default::default()
+    });
+    let storage = Storage::open(directory.0.join("data")).expect("storage");
+    let backend = Backend::new(storage.clone()).expect("backend");
+    backend.connect(Endpoint {
+        host: "127.0.0.1".into(),
+        port: server.port,
+        paired_id: None,
+    });
+    wait_for(&backend, |s| {
+        s.devices.iter().any(|d| d.status == DeviceStatus::Online)
+    });
+    wait_for_timeout(&backend, Duration::from_secs(13), |s| {
+        s.devices[0].detail.contains("后台连接检查未完成")
+    });
+    assert!(backend.snapshot().notice.is_empty());
+    wait_for_timeout(&backend, Duration::from_secs(13), |s| {
+        s.devices[0].detail.is_empty()
+    });
+    let log = std::fs::read_to_string(storage.directory.join("quickadb.log")).expect("log");
+    assert_eq!(log.matches("后台连接检查已恢复").count(), 1);
+    wait_for_timeout(&backend, Duration::from_secs(13), |s| {
+        s.devices[0].detail.contains("连接检查返回内容异常")
+    });
+    assert!(backend.snapshot().notice.is_empty());
+    wait_for_timeout(&backend, Duration::from_secs(13), |s| {
+        s.devices[0].detail.is_empty()
+    });
+    let snapshot = backend.snapshot();
+    assert_eq!(snapshot.devices[0].status, DeviceStatus::Online);
+    assert!(snapshot.notice.is_empty());
+    let log = std::fs::read_to_string(storage.directory.join("quickadb.log")).expect("log");
+    assert_eq!(log.matches("后台连接检查未完成").count(), 2);
+    assert_eq!(log.matches("后台连接检查已恢复").count(), 2);
+    let probes = server
+        .records
+        .lock()
+        .expect("records")
+        .services
+        .iter()
+        .filter(|service| service.ends_with(b"echo quickadb\0"))
+        .count();
+    assert!(probes >= 4);
+    backend.toggle(&snapshot.devices[0].id);
+    let apk = support::write_apk(&directory, "检查恢复后.apk", "test.recovered", "", 1);
+    let expected = std::fs::read(&apk).expect("bytes");
+    backend.submit(vec![apk], false, false);
+    wait_for(&backend, |s| s.jobs.len() == 1 && !s.jobs[0].stage.active());
+    assert_eq!(backend.snapshot().jobs[0].stage, JobStage::Succeeded);
+    assert_eq!(
+        server.records.lock().expect("records").uploads,
+        vec![expected]
+    );
     drop(backend);
 }
 

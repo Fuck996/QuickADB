@@ -928,6 +928,7 @@ impl Engine {
     }
 
     async fn watch_connection(self: Arc<Self>, id: String, client: Arc<AdbClient>) {
+        let mut last_check_error: Option<(String, String)> = None;
         loop {
             let reason = tokio::select! {
                 _ = self.stop.cancelled() => return,
@@ -937,7 +938,10 @@ impl Engine {
             let result = if reason.is_none() {
                 tokio::select! {
                     _ = self.stop.cancelled() => return,
-                    result = shell_text(&client, "echo quickadb") => Some(result),
+                    result = shell_text(&client, "echo quickadb") => Some(result.and_then(|output| {
+                        ensure!(output.trim() == "quickadb", "连接检查返回内容异常：{output:?}");
+                        Ok(())
+                    })),
                 }
             } else {
                 None
@@ -965,12 +969,37 @@ impl Engine {
             }
             match result {
                 Some(Err(error)) => {
-                    let detail = format!("状态检查失败，ADB 会话仍已连接：{error:#}");
+                    let key = match error.downcast_ref::<droidmux::shell::ShellError>() {
+                        Some(droidmux::shell::ShellError::Client(
+                            droidmux::client::AdbClientError::StreamRejected { .. },
+                        )) => "ADB peer rejected connection check".into(),
+                        _ => format!("{error:#}"),
+                    };
+                    let detail = format!("后台连接检查未完成：{error:#}");
                     self.update_device(&id, |d| d.detail.clone_from(&detail));
                     drop(clients);
-                    self.notice(&format!("设备 {id} {detail}"));
+                    if last_check_error.as_ref().map(|(key, _)| key) != Some(&key)
+                        && let Err(error) = self.storage.log(&format!("设备 {id} {detail}"))
+                    {
+                        self.notice(&format!("连接检查日志保存失败：{error:#}"));
+                    }
+                    last_check_error = Some((key, detail));
                 }
-                Some(Ok(_)) => self.update_device(&id, |d| d.detail.clear()),
+                Some(Ok(())) => {
+                    if let Some((_, previous)) = last_check_error.take() {
+                        self.update_device(&id, |d| {
+                            if d.detail == previous {
+                                d.detail.clear();
+                            }
+                        });
+                        drop(clients);
+                        if let Err(error) =
+                            self.storage.log(&format!("设备 {id} 后台连接检查已恢复"))
+                        {
+                            self.notice(&format!("连接检查日志保存失败：{error:#}"));
+                        }
+                    }
+                }
                 None => {}
             }
         }

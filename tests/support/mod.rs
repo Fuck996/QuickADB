@@ -65,6 +65,7 @@ pub struct DeviceOptions {
     pub serial: &'static str,
     pub device_info: Option<&'static str>,
     pub reject_heartbeat: bool,
+    pub heartbeat_replies: &'static [HeartbeatReply],
     pub idle_timeout: Duration,
     pub tls: bool,
 }
@@ -78,10 +79,20 @@ impl Default for DeviceOptions {
             serial: "QUICKADB-TEST",
             device_info: None,
             reject_heartbeat: false,
+            heartbeat_replies: &[],
             idle_timeout: Duration::from_secs(5),
             tls: false,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+pub enum HeartbeatReply {
+    Success,
+    Rejected,
+    UnexpectedOutput,
+    CloseAfterOutput,
 }
 
 #[derive(Default)]
@@ -178,6 +189,7 @@ impl DeviceServer {
                 banner.as_bytes(),
             );
             let mut streams = BTreeMap::<u32, StreamState>::new();
+            let mut heartbeat_attempts = 0;
             while let Ok(packet) = read_packet(&mut socket) {
                 let local = packet.arg0;
                 let remote = local + 100;
@@ -188,7 +200,16 @@ impl DeviceServer {
                             .services
                             .push(packet.payload.to_vec());
                         let text = String::from_utf8_lossy(&packet.payload);
-                        if options.reject_heartbeat && packet.payload.ends_with(b"echo quickadb\0")
+                        let heartbeat = if packet.payload.ends_with(b"echo quickadb\0") {
+                            let reply = options.heartbeat_replies.get(heartbeat_attempts).copied();
+                            heartbeat_attempts += 1;
+                            reply
+                        } else {
+                            None
+                        };
+                        if packet.payload.ends_with(b"echo quickadb\0")
+                            && (options.reject_heartbeat
+                                || matches!(heartbeat, Some(HeartbeatReply::Rejected)))
                         {
                             send(&mut socket, AdbCommand::Close, 0, local, &[]);
                             continue;
@@ -212,6 +233,8 @@ impl DeviceServer {
                                 options.result.into()
                             } else if text.starts_with("shell:rm -f ") {
                                 String::new()
+                            } else if matches!(heartbeat, Some(HeartbeatReply::UnexpectedOutput)) {
+                                "unexpected\n".into()
                             } else {
                                 "quickadb\n".into()
                             };
@@ -226,6 +249,9 @@ impl DeviceServer {
                             };
                             if !reply.is_empty() {
                                 send(&mut socket, AdbCommand::Write, remote, local, &reply);
+                                if matches!(heartbeat, Some(HeartbeatReply::CloseAfterOutput)) {
+                                    send(&mut socket, AdbCommand::Close, remote, local, &[]);
+                                }
                                 state.pending_close = true;
                             } else {
                                 send(&mut socket, AdbCommand::Close, remote, local, &[]);
