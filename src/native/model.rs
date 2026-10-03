@@ -18,7 +18,18 @@ pub struct Settings {
     pub device_info: BTreeMap<String, DeviceInfo>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+impl Settings {
+    pub fn device_alias(&self, id: &str, serial: &str) -> Option<&str> {
+        // 旧版备注使用序列号；无线记录改用固定设备 ID，空值表示用户已清除备注。
+        self.aliases
+            .get(id)
+            .or_else(|| self.aliases.get(serial))
+            .filter(|alias| !alias.is_empty())
+            .map(String::as_str)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceInfo {
     pub model: String,
     pub serial: String,
@@ -77,6 +88,14 @@ pub struct Device {
 }
 
 impl Device {
+    pub fn alias_key(&self) -> &str {
+        if self.endpoint.is_some() || self.id.starts_with("tls:") {
+            &self.id
+        } else {
+            &self.serial
+        }
+    }
+
     pub fn selectable(&self) -> bool {
         self.status == DeviceStatus::Online
             || self.endpoint.is_some()

@@ -63,6 +63,7 @@ pub struct DeviceOptions {
     pub delay_ack: Duration,
     pub disconnect_after_upload: bool,
     pub serial: &'static str,
+    pub device_info: Option<&'static str>,
     pub reject_heartbeat: bool,
     pub idle_timeout: Duration,
     pub tls: bool,
@@ -75,6 +76,7 @@ impl Default for DeviceOptions {
             delay_ack: Duration::ZERO,
             disconnect_after_upload: false,
             serial: "QUICKADB-TEST",
+            device_info: None,
             reject_heartbeat: false,
             idle_timeout: Duration::from_secs(5),
             tls: false,
@@ -203,7 +205,9 @@ impl DeviceServer {
                         };
                         if text.starts_with("shell:") || text.starts_with("shell,v2,raw:") {
                             let reply = if text.contains("getprop") {
-                                format!("Protocol Test Device\n{}\n14\n", options.serial)
+                                options.device_info.map(str::to_owned).unwrap_or_else(|| {
+                                    format!("Protocol Test Device\n{}\n14\n", options.serial)
+                                })
                             } else if text.starts_with("shell:pm install ") {
                                 options.result.into()
                             } else if text.starts_with("shell:rm -f ") {

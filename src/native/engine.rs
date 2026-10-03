@@ -504,13 +504,16 @@ impl Backend {
     }
 
     pub fn set_alias(&self, device: &Device, alias: &str) {
+        let key = device.alias_key();
+        if key.is_empty() {
+            self.engine.notice("尚未读取 USB 设备序列号，无法保存备注");
+            return;
+        }
         match self.engine.storage.update_settings(|settings| {
-            if alias.trim().is_empty() {
-                settings.aliases.remove(&device.serial);
+            if key == device.serial && alias.trim().is_empty() {
+                settings.aliases.remove(key);
             } else {
-                settings
-                    .aliases
-                    .insert(device.serial.clone(), alias.trim().into());
+                settings.aliases.insert(key.into(), alias.trim().into());
             }
         }) {
             Ok(()) => self.engine.update_device(&device.id, |d| {
@@ -818,23 +821,37 @@ impl Engine {
             Ok(client) => {
                 let info = tokio::select! {
                     _ = cancel.cancelled() => Err(anyhow::anyhow!("连接已取消")),
-                    result = shell_text(&client, "getprop ro.product.model; getprop ro.serialno; getprop ro.build.version.release") => result,
+                    result = shell_text(&client, "getprop ro.product.model && getprop ro.serialno && getprop ro.build.version.release") => result,
                 };
                 let info = info.and_then(|output| {
-                    let expected = self
-                        .storage
-                        .settings()
-                        .device_info
-                        .get(&id)
-                        .map(|d| d.serial.clone());
-                    if let Some(expected) = expected.filter(|s| !s.is_empty()) {
+                    let mut info = parse_device_info(&output)?;
+                    let settings = self.storage.settings();
+                    let saved = settings.device_info.get(&id);
+                    if let Some(expected) = saved.map(|d| &d.serial).filter(|s| !s.is_empty()) {
                         ensure!(
-                            output.lines().nth(1).unwrap_or("").trim() == expected,
+                            &info.serial == expected,
                             "连接到的设备序列号与原记录不同，已停止连接与安装"
                         );
                     }
+                    let mut missing = Vec::new();
+                    if info.model.is_empty() {
+                        missing.push("型号");
+                        if let Some(saved) = saved {
+                            info.model.clone_from(&saved.model);
+                        }
+                    }
+                    if info.android.is_empty() {
+                        missing.push("Android 版本");
+                        if let Some(saved) = saved {
+                            info.android.clone_from(&saved.android);
+                        }
+                    }
+                    let detail = if missing.is_empty() {
+                        String::new()
+                    } else {
+                        format!("手机未返回{}；保留已保存的设备信息", missing.join("、"))
+                    };
                     if id.starts_with("tls:") || id.starts_with("tcp://") {
-                        let lines: Vec<_> = output.lines().collect();
                         let endpoint = self
                             .state
                             .lock()
@@ -848,35 +865,36 @@ impl Engine {
                                 settings.endpoints.retain(|e| e.key() != id);
                                 settings.endpoints.push(endpoint);
                             }
-                            settings.device_info.insert(
-                                id.clone(),
-                                DeviceInfo {
-                                    model: lines.first().copied().unwrap_or("").trim().into(),
-                                    serial: lines.get(1).copied().unwrap_or("").trim().into(),
-                                    android: lines.get(2).copied().unwrap_or("").trim().into(),
-                                },
-                            );
+                            if !settings.aliases.contains_key(&id)
+                                && let Some(alias) = settings.aliases.get(&info.serial).cloned()
+                            {
+                                settings.aliases.insert(id.clone(), alias);
+                            }
+                            settings.device_info.insert(id.clone(), info.clone());
                         })?;
                     }
-                    Ok(output)
+                    Ok((info, detail))
                 });
                 match info {
-                    Ok(output) => {
-                        let lines: Vec<_> = output.lines().collect();
-                        let model = lines.first().copied().unwrap_or("").trim();
-                        let serial = lines.get(1).copied().unwrap_or("").trim();
-                        let android = lines.get(2).copied().unwrap_or("").trim();
-                        let alias = self.storage.settings().aliases.get(serial).cloned();
+                    Ok((info, detail)) => {
+                        let alias = self
+                            .storage
+                            .settings()
+                            .device_alias(&id, &info.serial)
+                            .map(str::to_owned);
                         self.update_device(&id, |d| {
-                            if !model.is_empty() {
-                                d.model = model.into();
-                                d.name = alias.unwrap_or_else(|| model.into());
+                            if !info.model.is_empty() {
+                                d.model.clone_from(&info.model);
                             }
-                            d.serial = serial.into();
-                            d.android = android.into();
+                            d.name = alias.unwrap_or_else(|| d.model.clone());
+                            d.serial = info.serial;
+                            d.android = info.android;
                             d.status = DeviceStatus::Online;
-                            d.detail.clear();
+                            d.detail.clone_from(&detail);
                         });
+                        if !detail.is_empty() {
+                            self.notice(&format!("设备 {id}：{detail}"));
+                        }
                         let client = Arc::new(client);
                         self.clients.lock().await.insert(id.clone(), client.clone());
                         tokio::spawn(self.clone().watch_connection(id.clone(), client.clone()));
@@ -1328,9 +1346,8 @@ fn saved_devices(storage: &Storage) -> Vec<Device> {
                 });
             Device {
                 name: settings
-                    .aliases
-                    .get(&serial)
-                    .cloned()
+                    .device_alias(&id, &serial)
+                    .map(str::to_owned)
                     .unwrap_or_else(|| model.clone()),
                 model,
                 serial,
@@ -1344,6 +1361,19 @@ fn saved_devices(storage: &Storage) -> Vec<Device> {
             }
         })
         .collect()
+}
+
+fn parse_device_info(output: &str) -> Result<DeviceInfo> {
+    let lines: Vec<_> = output.lines().map(str::trim).collect();
+    ensure!(
+        lines.len() == 3,
+        "设备信息返回不完整或格式异常，未更新已保存的信息"
+    );
+    Ok(DeviceInfo {
+        model: lines[0].into(),
+        serial: lines[1].into(),
+        android: lines[2].into(),
+    })
 }
 
 pub async fn shell_text(client: &AdbClient, command: &str) -> Result<String> {

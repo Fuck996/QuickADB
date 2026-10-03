@@ -689,3 +689,171 @@ fn remembered_tcp_device_rejects_an_address_reused_by_another_phone() {
     assert!(server.records.lock().expect("records").uploads.is_empty());
     drop(backend);
 }
+
+#[test]
+fn missing_properties_keep_saved_model_and_custom_name_after_restart() {
+    let directory = TempDirectory::new();
+    let server = DeviceServer::start(DeviceOptions {
+        features: "shell_v2,cmd,abb_exec",
+        device_info: Some("\nQUICKADB-TEST\n\n"),
+        ..Default::default()
+    });
+    let endpoint = Endpoint {
+        host: "127.0.0.1".into(),
+        port: server.port,
+        paired_id: None,
+    };
+    let id = endpoint.key();
+    let data = directory.0.join("data");
+    let storage = Storage::open(data.clone()).expect("storage");
+    let saved = quickadb::model::DeviceInfo {
+        model: "已读取的手机型号".into(),
+        serial: "QUICKADB-TEST".into(),
+        android: "16".into(),
+    };
+    storage
+        .update_settings(|settings| {
+            settings.endpoints.push(endpoint);
+            settings.device_info.insert(id.clone(), saved.clone());
+            settings
+                .aliases
+                .insert(saved.serial.clone(), "人工命名的测试机".into());
+        })
+        .expect("saved name");
+    let backend = Backend::new(storage.clone()).expect("backend");
+    wait_for(&backend, |s| s.devices[0].status == DeviceStatus::Online);
+    let device = backend.snapshot().devices.remove(0);
+    assert_eq!(device.name, "人工命名的测试机");
+    assert_eq!(device.model, saved.model);
+    assert_eq!(device.android, saved.android);
+    assert!(device.detail.contains("未返回"));
+    assert_eq!(storage.settings().device_info[&id], saved);
+    assert_eq!(storage.settings().aliases[&id], "人工命名的测试机");
+    drop(backend);
+    drop(storage);
+
+    let storage = Storage::open(data).expect("reopen disk storage");
+    assert_eq!(storage.settings().device_info[&id], saved);
+    let backend = Backend::new(storage).expect("restarted backend");
+    let device = backend.snapshot().devices.remove(0);
+    assert_eq!(device.name, "人工命名的测试机");
+    assert_eq!(device.model, saved.model);
+    assert_eq!(device.android, "16");
+    assert!(!device.selected);
+    drop(backend);
+}
+
+#[test]
+fn incomplete_property_response_does_not_replace_saved_identity_or_name() {
+    let directory = TempDirectory::new();
+    let server = DeviceServer::start(DeviceOptions {
+        device_info: Some("truncated response\n"),
+        ..Default::default()
+    });
+    let endpoint = Endpoint {
+        host: "127.0.0.1".into(),
+        port: server.port,
+        paired_id: None,
+    };
+    let id = endpoint.key();
+    let storage = Storage::open(directory.0.join("data")).expect("storage");
+    let saved = quickadb::model::DeviceInfo {
+        model: "原设备型号".into(),
+        serial: "QUICKADB-TEST".into(),
+        android: "14".into(),
+    };
+    storage
+        .update_settings(|settings| {
+            settings.endpoints.push(endpoint);
+            settings.device_info.insert(id.clone(), saved.clone());
+            settings.aliases.insert(id.clone(), "我的测试手机".into());
+        })
+        .expect("saved info");
+    let backend = Backend::new(storage.clone()).expect("backend");
+    wait_for(&backend, |s| {
+        s.devices[0].status == DeviceStatus::Offline && s.devices[0].detail.contains("返回不完整")
+    });
+    let device = backend.snapshot().devices.remove(0);
+    assert_eq!(device.name, "我的测试手机");
+    assert_eq!(storage.settings().device_info[&id], saved);
+    assert!(server.records.lock().expect("records").uploads.is_empty());
+    drop(backend);
+}
+
+#[test]
+fn old_address_only_settings_recover_legacy_custom_name_on_verified_connection() {
+    let directory = TempDirectory::new();
+    let server = DeviceServer::start(DeviceOptions::default());
+    let endpoint = Endpoint {
+        host: "127.0.0.1".into(),
+        port: server.port,
+        paired_id: None,
+    };
+    let id = endpoint.key();
+    let data = directory.0.join("data");
+    std::fs::create_dir_all(&data).expect("data directory");
+    std::fs::write(
+        data.join("settings.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "endpoints": [endpoint],
+            "aliases": {"QUICKADB-TEST": "用户原来的备注"}
+        }))
+        .expect("old settings"),
+    )
+    .expect("write old settings");
+    let storage = Storage::open(data.clone()).expect("storage");
+    assert!(storage.settings().device_info.is_empty());
+    let backend = Backend::new(storage.clone()).expect("backend");
+    wait_for(&backend, |s| s.devices[0].status == DeviceStatus::Online);
+    assert_eq!(backend.snapshot().devices[0].name, "用户原来的备注");
+    assert_eq!(storage.settings().aliases[&id], "用户原来的备注");
+    assert_eq!(
+        storage.settings().device_info[&id].model,
+        "Protocol Test Device"
+    );
+    let device = backend.snapshot().devices.remove(0);
+    backend.set_alias(&device, "新的设备名字");
+    assert_eq!(backend.snapshot().devices[0].name, "新的设备名字");
+    drop(backend);
+    drop(storage);
+
+    let backend = Backend::new(Storage::open(data.clone()).expect("reopen")).expect("restart");
+    let device = backend.snapshot().devices.remove(0);
+    assert_eq!(device.name, "新的设备名字");
+    backend.set_alias(&device, "");
+    assert_eq!(backend.snapshot().devices[0].name, "Protocol Test Device");
+    drop(backend);
+    let backend = Backend::new(Storage::open(data).expect("reopen")).expect("restart");
+    assert_eq!(backend.snapshot().devices[0].name, "Protocol Test Device");
+    drop(backend);
+}
+
+#[test]
+fn offline_paired_device_keeps_custom_name_without_a_serial_number() {
+    let directory = TempDirectory::new();
+    let data = directory.0.join("data");
+    let storage = Storage::open(data.clone()).expect("storage");
+    let runtime = tokio::runtime::Runtime::new().expect("pairing runtime");
+    runtime
+        .block_on(storage.save_paired_device(&StoredPairedDevice {
+            device_id: "offline-named-device".into(),
+            host: "192.0.2.20".into(),
+            certificate_fingerprint: "fixture-only".into(),
+        }))
+        .expect("save pairing record");
+    drop(runtime);
+    let backend = Backend::new(storage.clone()).expect("backend");
+    let device = backend.snapshot().devices.remove(0);
+    assert!(device.serial.is_empty());
+    backend.set_alias(&device, "离线也要记住的名字");
+    assert_eq!(backend.snapshot().devices[0].name, "离线也要记住的名字");
+    drop(backend);
+    drop(storage);
+    let backend = Backend::new(Storage::open(data).expect("reopen")).expect("restart");
+    let device = backend.snapshot().devices.remove(0);
+    assert_eq!(device.name, "离线也要记住的名字");
+    assert_eq!(device.id, "tls:offline-named-device");
+    assert_eq!(device.status, DeviceStatus::Offline);
+    assert!(!device.selected);
+    drop(backend);
+}

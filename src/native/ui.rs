@@ -677,9 +677,8 @@ impl Drawer {
             alias: self
                 .storage
                 .settings()
-                .aliases
-                .get(&device.serial)
-                .cloned()
+                .device_alias(&device.id, &device.serial)
+                .map(str::to_owned)
                 .unwrap_or_default(),
         });
     }
@@ -1542,7 +1541,7 @@ impl Drawer {
                     ui.label(format!("Android：{}", device.android));
                     if !device.detail.is_empty() { ui.label(&device.detail); }
                     field(ui, "设备备注", alias, false, "为设备起一个容易识别的名字");
-                    if ui.add_enabled(!device.serial.is_empty(), egui::Button::new("保存备注")).clicked() {
+                    if ui.add_enabled(!device.alias_key().is_empty(), egui::Button::new("保存备注")).clicked() {
                         self.backend.set_alias(device, alias);
                         close = true;
                     }
