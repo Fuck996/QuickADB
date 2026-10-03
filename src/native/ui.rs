@@ -551,9 +551,11 @@ impl Drawer {
                                 ));
                             let selection = ui
                                 .add_enabled_ui(device.selectable() || sidebar, |ui| {
+                                    let content_width =
+                                        (row_width - frame.total_margin().sum().x).max(1.);
                                     frame
                                         .show(ui, |ui| {
-                                            ui.set_width(row_width - 20.);
+                                            ui.set_width(content_width);
                                             ui.set_min_height(42.);
                                             ui.vertical(|ui| {
                                                 ui.horizontal(|ui| {
