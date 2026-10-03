@@ -1456,7 +1456,7 @@ impl Drawer {
             return;
         };
         let mut close = false;
-        let dialog_height = (ctx.content_rect().height() - 64.).max(120.);
+        let dialog_height = (ctx.content_rect().height() - 48.).max(120.);
         let response = egui::Modal::new(egui::Id::new("drawer-dialog")).frame(egui::Frame::popup(&ctx.global_style()).corner_radius(14).inner_margin(16)).show(ctx, |ui| {
             ui.set_width((ctx.content_rect().width() - 64.).min(if self.preferences.windowed { 520. } else { 368. }).max(1.));
             egui::ScrollArea::vertical()
