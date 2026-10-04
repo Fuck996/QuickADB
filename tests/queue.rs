@@ -281,8 +281,86 @@ fn real_transport_loss_marks_device_offline_and_preserves_the_reason() {
     );
     assert!(!snapshot.devices[0].detail.contains("locally"));
     assert!(snapshot.devices[0].selected);
-    assert!(snapshot.notice.contains("连接中断"));
+    assert!(!snapshot.jobs[0].detail.is_empty());
+    assert!(snapshot.notice.is_empty());
     drop(backend);
+}
+
+#[test]
+fn idle_wireless_disconnect_preserves_preparation_and_completed_results_without_alerting() {
+    for completed_install in [false, true] {
+        let directory = TempDirectory::new();
+        let server = DeviceServer::start(DeviceOptions {
+            features: "shell_v2,cmd,abb_exec",
+            idle_timeout: Duration::from_secs(2),
+            ..Default::default()
+        });
+        let storage = Storage::open(directory.0.join("data")).expect("storage");
+        let backend = Backend::new(storage.clone()).expect("backend");
+        backend.connect(Endpoint {
+            host: "127.0.0.1".into(),
+            port: server.port,
+            paired_id: None,
+        });
+        wait_for(&backend, |s| {
+            s.devices.iter().any(|d| d.status == DeviceStatus::Online)
+        });
+        let device = backend.snapshot().devices[0].clone();
+        backend.set_alias(&device, "待机测试手机");
+        backend.toggle(&device.id);
+        let apk = support::write_apk(&directory, "待安装.apk", "test.idle", "", 1);
+        if completed_install {
+            backend.submit(vec![apk.clone()], false, false);
+            wait_for(&backend, |s| {
+                s.jobs.len() == 1 && s.jobs[0].stage == JobStage::Succeeded
+            });
+        }
+        backend.prepare(vec![apk], false);
+        let revision = prepared_revision(&backend);
+        backend.notify("用户操作提示");
+        wait_for(&backend, |s| s.devices[0].status == DeviceStatus::Offline);
+        let snapshot = backend.snapshot();
+        assert_eq!(snapshot.devices[0].name, "待机测试手机");
+        assert!(snapshot.devices[0].selected);
+        assert!(
+            snapshot.devices[0]
+                .detail
+                .contains("transport connection closed")
+        );
+        assert_eq!(snapshot.notice, "用户操作提示");
+        assert_eq!(
+            snapshot.preparation.as_ref().expect("preparation").revision,
+            revision
+        );
+        assert_eq!(snapshot.jobs.len(), usize::from(completed_install));
+        if completed_install {
+            assert_eq!(snapshot.jobs[0].stage, JobStage::Succeeded);
+        }
+        let log = std::fs::read_to_string(storage.directory.join("quickadb.log")).expect("log");
+        assert!(
+            log.lines()
+                .any(|line| line.contains("已离线：")
+                    && line.contains("transport connection closed")),
+            "{log}"
+        );
+        drop(backend);
+    }
+}
+
+#[test]
+fn operation_notice_expires_and_repeated_actions_get_a_fresh_lifetime() {
+    let directory = TempDirectory::new();
+    let storage = Storage::open(directory.0.join("data")).expect("storage");
+    let backend = Backend::new(storage.clone()).expect("backend");
+    backend.notify("操作未完成，请检查设备");
+    assert_eq!(backend.snapshot().notice, "操作未完成，请检查设备");
+    std::thread::sleep(Duration::from_secs(6));
+    backend.notify("操作未完成，请检查设备");
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(backend.snapshot().notice, "操作未完成，请检查设备");
+    wait_for_timeout(&backend, Duration::from_secs(6), |s| s.notice.is_empty());
+    let log = std::fs::read_to_string(storage.directory.join("quickadb.log")).expect("log");
+    assert_eq!(log.matches("操作未完成，请检查设备").count(), 2);
 }
 
 #[test]
@@ -502,7 +580,7 @@ fn rejected_status_command_does_not_close_a_usable_connection() {
         snapshot.devices
     );
     assert!(snapshot.devices[0].detail.contains("后台连接检查未完成"));
-    assert_eq!(snapshot.notice, "需要保留的用户操作提示");
+    assert!(snapshot.notice.is_empty());
     let log = std::fs::read_to_string(storage.directory.join("quickadb.log")).expect("log");
     assert_eq!(log.matches("后台连接检查未完成").count(), 1);
     assert!(

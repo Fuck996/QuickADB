@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -165,8 +169,30 @@ pub struct Snapshot {
     pub preparation: Option<ApkPreparation>,
     pub discovered: Vec<DiscoveredDevice>,
     pub notice: String,
+    pub(crate) notice_deadline: Option<Instant>,
     pub connecting: bool,
     pub pairing: bool,
+}
+
+impl Snapshot {
+    pub(crate) fn set_notice(&mut self, message: String) {
+        self.notice = message;
+        self.notice_deadline = Some(Instant::now() + Duration::from_secs(8));
+    }
+
+    pub(crate) fn clear_notice(&mut self) {
+        self.notice.clear();
+        self.notice_deadline = None;
+    }
+
+    pub(crate) fn expire_notice(&mut self) {
+        if self
+            .notice_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.clear_notice();
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

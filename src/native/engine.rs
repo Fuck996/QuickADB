@@ -132,11 +132,9 @@ impl Backend {
     }
 
     pub fn snapshot(&self) -> Snapshot {
-        self.engine
-            .state
-            .lock()
-            .expect("state lock poisoned")
-            .clone()
+        let mut state = self.engine.state.lock().expect("state lock poisoned");
+        state.expire_notice();
+        state.clone()
     }
 
     pub fn toggle(&self, id: &str) {
@@ -384,7 +382,9 @@ impl Backend {
             .cloned()
             .collect();
         if targets.is_empty() {
-            state.notice = "请先点击选择至少一台设备，再点击安装；离线无线设备会尝试重连".into();
+            drop(state);
+            self.engine
+                .notice("请先点击选择至少一台设备，再点击安装；离线无线设备会尝试重连");
             return;
         }
         if self
@@ -397,7 +397,8 @@ impl Backend {
             })
             .is_err()
         {
-            state.notice = "APK 提交队列已关闭".into();
+            drop(state);
+            self.engine.notice("APK 提交队列已关闭");
         } else {
             state.preparation = None;
         }
@@ -495,8 +496,7 @@ impl Backend {
             .state
             .lock()
             .expect("state lock poisoned")
-            .notice
-            .clear();
+            .clear_notice();
     }
 
     pub fn notify(&self, message: &str) {
@@ -540,10 +540,14 @@ impl Drop for Backend {
 impl Engine {
     fn notice(&self, message: &str) {
         let log = self.storage.log(message);
-        self.state.lock().expect("state lock poisoned").notice = match log {
+        let message = match log {
             Ok(()) => message.to_owned(),
             Err(error) => format!("{message}\n日志保存失败：{error:#}"),
         };
+        self.state
+            .lock()
+            .expect("state lock poisoned")
+            .set_notice(message);
     }
 
     fn update_device(&self, id: &str, action: impl FnOnce(&mut Device)) {
@@ -961,10 +965,13 @@ impl Engine {
                     if d.endpoint.is_none() && !d.id.starts_with("tls:") {
                         d.selected = false;
                     }
-                    d.detail = format!("连接中断：{reason}");
+                    d.detail = format!("设备已离线：{reason}");
                 });
                 drop(clients);
-                self.notice(&format!("设备 {id} 连接中断：{reason}"));
+                // 会话离线是设备状态；安装中的失败由任务流程记录，避免重复全局告警。
+                if let Err(error) = self.storage.log(&format!("设备 {id} 已离线：{reason}")) {
+                    self.notice(&format!("设备离线记录保存失败：{error:#}"));
+                }
                 return;
             }
             match result {
