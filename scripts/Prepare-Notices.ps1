@@ -1,3 +1,7 @@
+# Copyright (C) 2026 QuickADB contributors
+# SPDX-License-Identifier: GPL-3.0-only
+# 来源保留条款见项目根目录 NOTICE（GPL 第 7(b) 条）。
+
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
 $env:CARGO_HOME = Join-Path $projectRoot '.tools\cargo'
@@ -6,6 +10,7 @@ try {
     $metadataText = & cargo metadata --format-version 1 --locked --offline --filter-platform x86_64-pc-windows-msvc
     if ($LASTEXITCODE -ne 0) { throw '无法读取锁定依赖的许可信息。' }
     $metadata = $metadataText | ConvertFrom-Json
+    $supplements = Get-Content -LiteralPath (Join-Path $projectRoot 'assets\licenses\registry-notices.json') -Raw | ConvertFrom-Json -AsHashtable
     $included = @{}
     foreach ($node in $metadata.resolve.nodes) { $included[$node.id] = $true }
     $text = [System.Text.StringBuilder]::new()
@@ -28,13 +33,26 @@ try {
         if ($package.name -eq 'epaint_default_fonts') {
             $files += Get-ChildItem -LiteralPath (Join-Path $directory 'fonts') -File | Where-Object { $_.Name -match '(LICENSE|COPYING)' }
         }
+        if ($files.Count -eq 0) {
+            $key = "$($package.name)@$($package.version)"
+            if (!$supplements.ContainsKey($key)) { throw "组件缺少许可全文，请核对官方来源：$key" }
+            foreach ($entry in $supplements[$key].files) {
+                $file = Get-Item -LiteralPath (Join-Path $projectRoot "assets\licenses\$($entry.path)")
+                if ((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash -ne $entry.sha256) {
+                    throw "补充许可原文校验失败：$key / $($entry.path)"
+                }
+                [void]$text.AppendLine("License source: $($entry.source)")
+                $files += $file
+            }
+        }
         foreach ($file in ($files | Sort-Object FullName -Unique)) {
             [void]$text.AppendLine("--- $($file.Name) ---")
             [void]$text.AppendLine([System.IO.File]::ReadAllText($file.FullName))
         }
     }
     $output = Join-Path $projectRoot 'assets\ThirdPartyNotices.txt'
-    [System.IO.File]::WriteAllText($output, $text.ToString(), [System.Text.UTF8Encoding]::new($false))
+    $content = $text.ToString() -replace '(?m)[ \t]+\r?$', ''
+    [System.IO.File]::WriteAllText($output, $content, [System.Text.UTF8Encoding]::new($false))
     Write-Output "已生成内嵌许可：$output"
 }
 finally { Pop-Location }

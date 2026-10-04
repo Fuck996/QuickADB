@@ -1,0 +1,37 @@
+QuickADB
+Copyright (C) 2026 QuickADB contributors
+Original project: https://github.com/Fuck996/QuickADB
+
+QuickADB's original code, build scripts, tests, documentation and project
+assets are licensed under the GNU General Public License, version 3 only
+(GPL-3.0-only). See LICENSE for the unmodified license text. Third-party
+material retains its own copyright and license; this notice does not
+replace or relicense third-party notices.
+
+Attribution term under GNU GPL version 3, section 7(b):
+When conveying QuickADB's original material, or a covered work containing
+it, preserve the project name, copyright notice and original-project URL
+above in the source distribution and in the legal notices accompanying
+the binary distribution. An accompanying NOTICE or license document is
+sufficient; no advertising, logo or specific screen placement is required.
+This term does not require disclosure of private modifications that are
+not conveyed and does not restrict commercial use permitted by the GPL.
+
+Modified versions must identify their modifications and relevant dates
+as required by GPL section 5(a). Do not claim that a modified version is
+the unmodified original QuickADB release.
+
+This program is distributed without any warranty, including the implied
+warranties of merchantability or fitness for a particular purpose, to
+the extent permitted by applicable law. See LICENSE, sections 15 and 16.
+
+Third-party credits and licenses:
+  THIRD_PARTY.md
+  assets/ThirdPartyNotices.txt
+  assets/licenses/registry-notices.json
+  vendor/README.md and vendor/droidmux/LICENSE-MIT, LICENSE-APACHE
+
+The executable statically links libusb 1.0.27 via libusb1-sys 0.7.0.
+libusb is licensed under LGPL-2.1-or-later. Its complete source and license
+are included in the corresponding source archive alongside application
+sources and build instructions, allowing modification and relinking.

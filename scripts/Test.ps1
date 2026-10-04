@@ -1,3 +1,7 @@
+# Copyright (C) 2026 QuickADB contributors
+# SPDX-License-Identifier: GPL-3.0-only
+# 来源保留条款见项目根目录 NOTICE（GPL 第 7(b) 条）。
+
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
 $env:CARGO_HOME = Join-Path $projectRoot '.tools\cargo'

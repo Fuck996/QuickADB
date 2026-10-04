@@ -4,6 +4,8 @@
 
 当前版本：[0.9.6](https://github.com/Fuck996/QuickADB/releases/tag/v0.9.6)，适用于 Windows x64。
 
+许可：[GPL-3.0-only](LICENSE)，来源保留条款见 [NOTICE](NOTICE)。
+
 ## 下载
 
 [下载 QuickADB-0.9.6-x64.exe](https://github.com/Fuck996/QuickADB/releases/download/v0.9.6/QuickADB-0.9.6-x64.exe)，直接运行，无需安装。其他版本及校验值见 [GitHub Releases](https://github.com/Fuck996/QuickADB/releases)，本版更新说明见 [0.9.6 发布说明](docs/releases/0.9.6.md)。
@@ -59,6 +61,18 @@ Windows x64，PowerShell 7，Rust 1.95+，Visual Studio 2022 C++ Build Tools 与
 发布时同步更新 README 和版本发布说明，先将代码推送到远端并核对提交，再创建对应版本的 GitHub Release，上传已验证的同一份 EXE；版本标签须指向已同步的提交，远端资产须与本地产物校验一致。
 
 0.9.6 已通过 24 项应用协议集成测试和原生窗口、托盘验证，详见 [验证记录](docs/verification.md)。协议夹具通过不代表真实手机通过；USB 授权、手机无线配对、签名 APK 的真实安装和机型驱动兼容性仍需真机验收。
+
+## 开源许可与引用
+
+原创应用代码、脚本、测试、文档与项目素材采用 **GPLv3（仅第 3 版）**，正式许可见 [LICENSE](LICENSE)，来源声明见 [NOTICE](NOTICE)。
+
+允许使用、修改及商用。对外分发 QuickADB 或受 GPL 覆盖的修改、整合版本时，必须以 GPLv3 提供完整对应源码，保留 QuickADB 名称、版权、[原项目地址](https://github.com/Fuck996/QuickADB) 和许可声明，并标明修改内容及日期；不能把受覆盖的衍生产品闭源分发。未分发的内部修改无需公开，用本工具安装或测试的独立 APK 不受此约束。
+
+这就是本项目对“不能闭源商用、引用必须注明来源”的标准许可实现。具体边界与官方依据见 [许可说明](docs/licensing.md)。
+
+ADB 底层、USB 和界面等使用第三方库，保留其原作者与原许可；完整来源见 [THIRD_PARTY.md](THIRD_PARTY.md) 和 [第三方许可全文](assets/ThirdPartyNotices.txt)，不把第三方代码宣称为本项目原创。
+
+完整 [0.9.6 对应源码包](https://github.com/Fuck996/QuickADB/releases/download/v0.9.6/QuickADB-0.9.6-source.zip) 包含锁定依赖（含静态 libusb）、资源、许可和构建脚本；解压后使用 `scripts/Build-Source.ps1 -Release` 离线构建，另需安装前述通用构建工具。Release 同时提供法律声明，EXE 校验值不变。仅 GitHub 自动生成的仓库源码 ZIP 不包含所有注册表依赖，请使用完整对应源码包。
 
 ## Windows 发布者提示
 

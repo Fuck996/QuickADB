@@ -4,6 +4,9 @@ version = "0.9.6"
 edition = "2024"
 rust-version = "1.95"
 description = "常驻托盘的 Android APK 安装抽屉"
+license = "GPL-3.0-only"
+repository = "https://github.com/Fuck996/QuickADB"
+readme = "README.md"
 
 [lib]
 path = "src/native/lib.rs"

@@ -1,0 +1,4 @@
+LICENSE -text
+assets/licenses/** -text -whitespace
+assets/licenses/registry-notices.json text eol=lf whitespace=blank-at-eol
+assets/ThirdPartyNotices.txt text eol=lf
