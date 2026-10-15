@@ -120,6 +120,15 @@ enum Dialog {
         device: Device,
         alias: String,
     },
+    EditConnection {
+        device: Device,
+        automatic: bool,
+        host: String,
+        port: String,
+    },
+    Forget {
+        device: Device,
+    },
     Tcp {
         device: Device,
         host: String,
@@ -558,68 +567,50 @@ impl Drawer {
                                 .add_enabled_ui(device.selectable() || sidebar, |ui| {
                                     let content_width =
                                         (row_width - frame.total_margin().sum().x).max(1.);
-                                    frame
-                                        .show(ui, |ui| {
-                                            ui.set_width(content_width);
-                                            ui.set_min_height(42.);
-                                            ui.vertical(|ui| {
-                                                ui.horizontal(|ui| {
-                                                    ui.label(
-                                                        RichText::new(if device.selected {
-                                                            "●"
-                                                        } else {
-                                                            "○"
-                                                        })
-                                                        .color(if device.selected {
-                                                            GREEN
-                                                        } else {
-                                                            secondary_text(ui)
-                                                        }),
-                                                    );
-                                                    ui.vertical(|ui| {
-                                                        if sidebar {
-                                                            ui.set_width((row_width - 40.).max(1.));
-                                                        }
-                                                        let name = egui::Label::new(
-                                                            RichText::new(&device.name)
-                                                                .size(14.)
-                                                                .strong(),
-                                                        );
-                                                        ui.add(if sidebar {
-                                                            name.wrap()
-                                                        } else {
-                                                            name.truncate()
-                                                        })
-                                                        .on_hover_text(&device.name);
-                                                        if !sidebar {
-                                                            ui.add(
-                                                                egui::Label::new(
-                                                                    RichText::new(&status)
-                                                                        .small()
-                                                                        .color(secondary_text(ui)),
-                                                                )
-                                                                .truncate(),
-                                                            );
-                                                        }
-                                                    });
-                                                });
-                                                if sidebar {
+                                    ui.scope_builder(
+                                        egui::UiBuilder::new().id_salt(&device.id).sense(
+                                            if device.selectable() {
+                                                egui::Sense::click()
+                                            } else {
+                                                egui::Sense::hover()
+                                            },
+                                        ),
+                                        |ui| {
+                                            frame.show(ui, |ui| {
+                                                ui.set_width(content_width);
+                                                ui.set_min_height(42.);
+                                                ui.vertical(|ui| {
                                                     ui.horizontal(|ui| {
-                                                        ui.with_layout(
-                                                            egui::Layout::right_to_left(
-                                                                egui::Align::Center,
-                                                            ),
-                                                            |ui| {
-                                                                if ui
-                                                                    .add(
-                                                                        egui::Button::new("详情")
-                                                                            .small()
-                                                                            .frame(false),
-                                                                    )
-                                                                    .clicked()
-                                                                {
-                                                                    self.device_detail(device);
-                                                                }
+                                                        ui.label(
+                                                            RichText::new(if device.selected {
+                                                                "●"
+                                                            } else {
+                                                                "○"
+                                                            })
+                                                            .color(if device.selected {
+                                                                GREEN
+                                                            } else {
+                                                                secondary_text(ui)
+                                                            }),
+                                                        );
+                                                        ui.vertical(|ui| {
+                                                            if sidebar {
+                                                                ui.set_width(
+                                                                    (row_width - 40.).max(1.),
+                                                                );
+                                                            }
+                                                            let name = egui::Label::new(
+                                                                RichText::new(&device.name)
+                                                                    .size(14.)
+                                                                    .strong(),
+                                                            );
+                                                            ui.add(if sidebar {
+                                                                name.wrap()
+                                                            } else {
+                                                                name.truncate()
+                                                            })
+                                                            .on_hover_text(&device.name);
+                                                            if !sidebar {
                                                                 ui.add(
                                                                     egui::Label::new(
                                                                         RichText::new(&status)
@@ -630,18 +621,49 @@ impl Drawer {
                                                                     )
                                                                     .truncate(),
                                                                 );
-                                                            },
-                                                        );
+                                                            }
+                                                        });
                                                     });
-                                                }
+                                                    if sidebar {
+                                                        ui.horizontal(|ui| {
+                                                            ui.with_layout(
+                                                                egui::Layout::right_to_left(
+                                                                    egui::Align::Center,
+                                                                ),
+                                                                |ui| {
+                                                                    if ui
+                                                                        .add(
+                                                                            egui::Button::new(
+                                                                                "详情",
+                                                                            )
+                                                                            .small()
+                                                                            .frame(false),
+                                                                        )
+                                                                        .clicked()
+                                                                    {
+                                                                        self.device_detail(device);
+                                                                    }
+                                                                    ui.add(
+                                                                        egui::Label::new(
+                                                                            RichText::new(&status)
+                                                                                .small()
+                                                                                .color(
+                                                                                    secondary_text(
+                                                                                        ui,
+                                                                                    ),
+                                                                                ),
+                                                                        )
+                                                                        .truncate(),
+                                                                    );
+                                                                },
+                                                            );
+                                                        });
+                                                    }
+                                                });
                                             });
-                                        })
-                                        .response
-                                        .interact(if device.selectable() {
-                                            egui::Sense::click()
-                                        } else {
-                                            egui::Sense::hover()
-                                        })
+                                        },
+                                    )
+                                    .response
                                 })
                                 .inner;
                             selection.widget_info(|| {
@@ -684,6 +706,31 @@ impl Drawer {
                 .settings()
                 .device_alias(&device.id, &device.serial)
                 .map(str::to_owned)
+                .unwrap_or_default(),
+        });
+    }
+
+    fn edit_connection(&mut self, device: &Device) {
+        let host = device
+            .endpoint
+            .as_ref()
+            .map(|e| e.host.clone())
+            .or_else(|| {
+                self.storage
+                    .paired_devices()
+                    .iter()
+                    .find(|p| Some(p.device_id.as_str()) == device.id.strip_prefix("tls:"))
+                    .map(|p| p.host.clone())
+            })
+            .unwrap_or_default();
+        self.dialog = Some(Dialog::EditConnection {
+            device: device.clone(),
+            automatic: device.id.starts_with("tls:"),
+            host,
+            port: device
+                .endpoint
+                .as_ref()
+                .map(|e| e.port.to_string())
                 .unwrap_or_default(),
         });
     }
@@ -1544,31 +1591,40 @@ impl Drawer {
                     if ui.small_button("复制数据目录").clicked() { ctx.copy_text(self.storage.directory.display().to_string()); }
                     ui.separator();
                     ui.label(RichText::new(concat!("QuickADB ", env!("CARGO_PKG_VERSION"))).small().color(secondary_text(ui)));
-                    if ui.small_button("复制开源组件许可").clicked() {
-                        ctx.copy_text(include_str!("../../assets/ThirdPartyNotices.txt").into());
+                    ui.label(RichText::new("© 2026 QuickADB contributors · GPLv3").small().color(secondary_text(ui)));
+                    ui.label(RichText::new("按现状提供，不作担保。").small().color(secondary_text(ui)));
+                    ui.hyperlink_to("项目与对应源码", concat!("https://github.com/Fuck996/QuickADB/releases/tag/v", env!("CARGO_PKG_VERSION")));
+                    if ui.small_button("复制完整许可与来源").clicked() {
+                        ctx.copy_text(format!("{}\n\n{}\n\n{}", include_str!("../../NOTICE"), include_str!("../../LICENSE"), include_str!("../../assets/ThirdPartyNotices.txt")));
                     }
                 }
                 Dialog::Devices => {
                     modal_heading(ui, "设备管理", &mut close);
-                    egui::ScrollArea::vertical().max_height(310.).show(ui, |ui| {
-                        for device in &snapshot.devices {
-                            ui.horizontal(|ui| {
-                                ui.vertical(|ui| { ui.label(RichText::new(&device.name).strong()); ui.label(RichText::new(format!("{} · {}", device.transport, device.status.label())).small().color(secondary_text(ui))); });
-                                if device.status != DeviceStatus::Online && device.status != DeviceStatus::Connecting && ui.small_button("重新连接").clicked() { self.backend.retry_connection(device.id.clone()); }
-                                if device.endpoint.is_some() && device.status == DeviceStatus::Online && ui.small_button("断开").clicked() { self.backend.disconnect(device.id.clone()); }
+                    ui.label(RichText::new("管理连接地址、设备备注与本机配对记录。").small().color(secondary_text(ui)));
+                    if snapshot.devices.is_empty() { ui.label("还没有设备记录，连接设备后会显示在这里。"); }
+                    for device in &snapshot.devices {
+                        ui.push_id(&device.id, |ui| {
+                            card(ui, self.preferences.dark, |ui| {
+                                ui.label(RichText::new(&device.name).strong());
+                                ui.label(RichText::new(format!("{} · {}", device.transport, device.status.label())).small().color(secondary_text(ui)));
+                                if let Some(endpoint) = &device.endpoint { ui.label(format!("{}:{}", endpoint.host, endpoint.port)); }
+                                let busy = snapshot.managing.contains(&device.id);
+                                ui.add_enabled_ui(!busy, |ui| {
+                                    ui.horizontal_wrapped(|ui| {
+                                        if ui.button("详情").clicked() { self.device_detail(device); close = true; }
+                                        if device.endpoint.is_some() || device.id.starts_with("tls:") {
+                                            if ui.button("编辑连接").clicked() { self.edit_connection(device); close = true; }
+                                            if ui.button(if device.id.starts_with("tls:") { "删除配对设备" } else { "删除连接记录" }).clicked() {
+                                                self.dialog = Some(Dialog::Forget { device: device.clone() }); close = true;
+                                            }
+                                        }
+                                    });
+                                });
+                                if busy { ui.horizontal(|ui| { ui.spinner(); ui.label("正在处理设备记录…"); }); }
                             });
-                            ui.separator();
-                        }
-                        ui.label(RichText::new("无线连接记录").strong());
-                        for endpoint in self.storage.settings().endpoints {
-                            ui.horizontal(|ui| {
-                                ui.label(format!("{}:{}", endpoint.host, endpoint.port));
-                                if ui.small_button("连接").clicked() { self.backend.connect(endpoint.clone()); }
-                                if ui.small_button("移除记录").clicked()
-                                    && let Err(error) = self.storage.update_settings(|settings| settings.endpoints.retain(|e| e.key() != endpoint.key())) { self.backend.notify(&format!("移除记录失败：{error:#}")); }
-                            });
-                        }
-                    });
+                            ui.add_space(8.);
+                        });
+                    }
                 }
                 Dialog::Notice { message } => {
                     modal_heading(ui, "提示详情", &mut close);
@@ -1578,11 +1634,13 @@ impl Drawer {
                     if ui.button("复制完整提示").clicked() { ctx.copy_text(message.clone()); }
                 }
                 Dialog::Detail { device, alias } => {
+                    if let Some(current) = snapshot.devices.iter().find(|d| d.id == device.id) { *device = current.clone(); }
                     modal_heading(ui, "设备详情", &mut close);
                     ui.label(RichText::new(&device.name).size(16.).strong());
                     ui.label(format!("{} · {}", device.transport, device.status.label()));
                     ui.label(format!("序列号：{}", device.serial));
                     ui.label(format!("Android：{}", device.android));
+                    if let Some(endpoint) = &device.endpoint { ui.label(format!("连接地址：{}:{}", endpoint.host, endpoint.port)); }
                     if !device.detail.is_empty() { ui.label(&device.detail); }
                     field(ui, "设备备注", alias, false, "为设备起一个容易识别的名字");
                     if ui.add_enabled(!device.alias_key().is_empty(), egui::Button::new("保存备注")).clicked() {
@@ -1594,7 +1652,54 @@ impl Drawer {
                         if device.endpoint.is_some() && ui.button("断开无线连接").clicked() { self.backend.disconnect(device.id.clone()); close = true; }
                         if device.endpoint.is_none() && ui.button("通过 USB 转无线").clicked() { self.dialog = Some(Dialog::Tcp { device: device.clone(), host: String::new(), port: "5555".into() }); close = true; }
                     }
+                    if device.endpoint.is_some() || device.id.starts_with("tls:") {
+                        ui.separator();
+                        if ui.add_enabled(!snapshot.managing.contains(&device.id), egui::Button::new("编辑连接")).clicked() { self.edit_connection(device); close = true; }
+                        if ui.add_enabled(!snapshot.managing.contains(&device.id), egui::Button::new(if device.id.starts_with("tls:") { "删除配对设备" } else { "删除连接记录" })).clicked() {
+                            self.dialog = Some(Dialog::Forget { device: device.clone() }); close = true;
+                        }
+                    }
                     if ui.small_button("复制设备标识").clicked() { ctx.copy_text(device.id.clone()); }
+                }
+                Dialog::EditConnection { device, automatic, host, port } => {
+                    modal_heading(ui, "编辑连接", &mut close);
+                    ui.label(RichText::new(&device.name).strong());
+                    let paired = device.id.starts_with("tls:");
+                    if paired { ui.checkbox(automatic, "自动发现当前地址与端口（推荐）"); }
+                    ui.add_enabled_ui(!*automatic, |ui| {
+                        field(ui, "手机 IP 或主机名", host, false, "例如 192.168.1.8");
+                        field(ui, "连接端口", port, false, if paired { "无线调试主页中的端口" } else { "例如 5555" });
+                    });
+                    if paired { ui.label(RichText::new("保留原设备配对身份。手动连接使用本次填写的地址，之后安装仍自动发现当前端口。").small().color(secondary_text(ui))); }
+                    let active = snapshot.jobs.iter().any(|j| j.device_id == device.id && j.stage.active());
+                    if active { ui.colored_label(ui.visuals().warn_fg_color, "此设备仍有安装任务，请等待结束或取消任务后再修改。"); }
+                    if !*automatic && !port.trim().is_empty() && !port.trim().parse::<u16>().is_ok_and(|p| p > 0) {
+                        ui.colored_label(ui.visuals().error_fg_color, "连接端口需为 1–65535 的整数。");
+                    }
+                    let valid = *automatic || (!host.trim().is_empty() && port.trim().parse::<u16>().is_ok_and(|p| p > 0));
+                    ui.horizontal(|ui| {
+                        if ui.button("取消").clicked() { close = true; }
+                        if ui.add_enabled(valid && !active && !snapshot.managing.contains(&device.id), primary_button("保存并连接")).clicked() {
+                            let endpoint = if *automatic { None } else { Some(Endpoint { host: host.trim().into(), port: port.trim().parse().expect("validated port"), paired_id: device.id.strip_prefix("tls:").map(str::to_owned) }) };
+                            self.backend.update_connection(device.id.clone(), endpoint);
+                            close = true;
+                        }
+                    });
+                }
+                Dialog::Forget { device } => {
+                    let paired = device.id.starts_with("tls:");
+                    modal_heading(ui, if paired { "删除配对设备" } else { "删除连接记录" }, &mut close);
+                    ui.label(RichText::new(&device.name).strong());
+                    ui.label(if paired { "将断开连接，删除此设备在本机的配对、连接地址与名称记录。以后使用需要重新配对。" } else { "将断开连接，并删除此设备的连接地址与名称记录。" });
+                    if paired { ui.label(RichText::new("其他设备授权不受影响。此操作不会撤销手机端对电脑的授权，如需撤销，请在手机无线调试的已配对设备中选择“忘记”。").small().color(secondary_text(ui))); }
+                    let active = snapshot.jobs.iter().any(|j| j.device_id == device.id && j.stage.active());
+                    if active { ui.colored_label(ui.visuals().warn_fg_color, "此设备仍有安装任务，请等待结束或取消任务后再删除。"); }
+                    ui.horizontal(|ui| {
+                        if ui.button("保留设备").clicked() { close = true; }
+                        if ui.add_enabled(!active && !snapshot.managing.contains(&device.id), egui::Button::new("确认删除").fill(ui.visuals().error_fg_color.gamma_multiply(0.18))).clicked() {
+                            self.backend.forget_device(device.id.clone()); close = true;
+                        }
+                    });
                 }
                 Dialog::Tcp { device, host, port } => {
                     modal_heading(ui, "USB 转无线", &mut close);

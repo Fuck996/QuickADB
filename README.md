@@ -2,13 +2,13 @@
 
 常驻 Windows 托盘的 APK 安装抽屉。使用原生 Rust 应用与静态 ADB 协议库，运行时不释放 adb.exe 或应用 DLL，不要求安装 .NET，也不依赖外部 ADB server。
 
-当前版本：[0.9.6](https://github.com/Fuck996/QuickADB/releases/tag/v0.9.6)，适用于 Windows x64。
+当前版本：[0.9.7](https://github.com/Fuck996/QuickADB/releases/tag/v0.9.7)，适用于 Windows x64。
 
 许可：[GPL-3.0-only](LICENSE)，来源保留条款见 [NOTICE](NOTICE)。
 
 ## 下载
 
-[下载 QuickADB-0.9.6-x64.exe](https://github.com/Fuck996/QuickADB/releases/download/v0.9.6/QuickADB-0.9.6-x64.exe)，直接运行，无需安装。其他版本及校验值见 [GitHub Releases](https://github.com/Fuck996/QuickADB/releases)，本版更新说明见 [0.9.6 发布说明](docs/releases/0.9.6.md)。
+[下载 QuickADB-0.9.7-x64.exe](https://github.com/Fuck996/QuickADB/releases/download/v0.9.7/QuickADB-0.9.7-x64.exe)，直接运行，无需安装。其他版本及校验值见 [GitHub Releases](https://github.com/Fuck996/QuickADB/releases)，本版更新说明见 [0.9.7 发布说明](docs/releases/0.9.7.md)。
 
 ## 功能
 
@@ -19,7 +19,7 @@
 - 托盘抽屉、图钉固定置顶、拖动定位，以及可调整大小和贴靠的 Windows 标准窗口。
 - 可选开机启动、深浅主题；单 EXE 使用，运行依赖静态编译。
 
-0.9.6 将空闲无线断线作为普通离线状态处理，操作提示 8 秒后自动收起，安装按钮保持在可见区域。安装中断仍在对应任务中显示失败或结果未知，原始原因保留在详情与日志。
+0.9.7 修复标准窗口侧栏的详情点击，并支持编辑连接、删除本机配对或连接记录。空闲无线断线作为普通离线状态处理，操作提示 8 秒后自动收起，安装按钮保持在可见区域。安装中断仍在对应任务中显示失败或结果未知，原始原因保留在详情与日志。
 
 ## 使用
 
@@ -35,6 +35,10 @@
 重启后主列表保留已保存的无线设备及名称、备注。离线无线设备仍可选择；点击安装时先按原设备的配对 GUID 获取当前端口并重连，成功后才传 APK。连接中可以取消，失败保留真实原因与设备记录；不会自动重放已经中断的安装，也不会改装到其他设备。
 
 手动备注优先于手机型号，已保存的无线设备离线时也能改名。旧版仅保存地址和序列号备注的记录，在下一次成功连接原设备后自动补齐名称关联；原备注无需重新输入。手机未返回型号或 Android 版本时保留此前读取的信息，格式异常则明确报错并停止更新。
+
+连接地址填错时，在“详情”或“设备管理”中选择“编辑连接”，保存后重新连接；失败后尚未保存的连接也能编辑。修改 TCP 地址保留备注与已知设备身份，避免误连其他手机。已配对设备可恢复自动发现，或手动填写本次使用的连接地址。
+
+“删除配对设备”会在确认后断开连接，清理本机对应的配对、地址和名称记录，重启后不再恢复此设备；其他设备授权与已完成任务保留。手机端撤销电脑授权需在手机无线调试设置中选择“忘记”。设备有安装任务时，先完成或取消任务再修改、删除记录。
 
 设备空闲时断线只显示离线，不弹全局断线报错，设备选择、待安装列表和已完成任务保持不变。后台连接检查的临时失败保留在详情及日志。用户操作提示可手动关闭或点击查看完整内容，8 秒后自动收起；任务中的错误和日志不会随提示消失。
 
@@ -60,7 +64,7 @@ Windows x64，PowerShell 7，Rust 1.95+，Visual Studio 2022 C++ Build Tools 与
 
 发布时同步更新 README 和版本发布说明，先将代码推送到远端并核对提交，再创建对应版本的 GitHub Release，上传已验证的同一份 EXE；版本标签须指向已同步的提交，远端资产须与本地产物校验一致。
 
-0.9.6 已通过 24 项应用协议集成测试和原生窗口、托盘验证，详见 [验证记录](docs/verification.md)。协议夹具通过不代表真实手机通过；USB 授权、手机无线配对、签名 APK 的真实安装和机型驱动兼容性仍需真机验收。
+0.9.7 已通过 30 项应用协议与持久化集成回归，原生窗口交互及具体范围见 [验证记录](docs/verification.md)。协议夹具通过不代表真实手机通过；USB 授权、手机无线配对、签名 APK 的真实安装和机型驱动兼容性仍需真机验收。
 
 ## 开源许可与引用
 
@@ -72,7 +76,7 @@ Windows x64，PowerShell 7，Rust 1.95+，Visual Studio 2022 C++ Build Tools 与
 
 ADB 底层、USB 和界面等使用第三方库，保留其原作者与原许可；完整来源见 [THIRD_PARTY.md](THIRD_PARTY.md) 和 [第三方许可全文](assets/ThirdPartyNotices.txt)，不把第三方代码宣称为本项目原创。
 
-完整 [0.9.6 对应源码包](https://github.com/Fuck996/QuickADB/releases/download/v0.9.6/QuickADB-0.9.6-source.zip) 包含锁定依赖（含静态 libusb）、资源、许可和构建脚本；解压后使用 `scripts/Build-Source.ps1 -Release` 离线构建，另需安装前述通用构建工具。Release 同时提供法律声明，EXE 校验值不变。仅 GitHub 自动生成的仓库源码 ZIP 不包含所有注册表依赖，请使用完整对应源码包。
+完整 [0.9.7 对应源码包](https://github.com/Fuck996/QuickADB/releases/download/v0.9.7/QuickADB-0.9.7-source.zip) 包含锁定依赖（含静态 libusb）、资源、许可和构建脚本；解压后使用 `scripts/Build-Source.ps1 -Release` 离线构建，另需安装前述通用构建工具。Release 同时提供法律声明。仅 GitHub 自动生成的仓库源码 ZIP 不包含所有注册表依赖，请使用完整对应源码包。
 
 ## Windows 发布者提示
 

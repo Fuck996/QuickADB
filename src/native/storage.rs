@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // 来源保留条款见项目根目录 NOTICE（GPL 第 7(b) 条）。
 
-use crate::model::Settings;
-use anyhow::{Context, Result};
+use crate::model::{Endpoint, Settings};
+use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use droidmux::{
     auth::RsaAdbCredential,
@@ -84,11 +84,71 @@ impl Storage {
     }
 
     pub fn update_settings(&self, change: impl FnOnce(&mut Settings)) -> Result<()> {
+        self.change_settings(|settings| {
+            change(settings);
+            Ok(())
+        })
+    }
+
+    fn change_settings(&self, change: impl FnOnce(&mut Settings) -> Result<()>) -> Result<()> {
         let mut saved = self.settings.lock().expect("settings lock poisoned");
         let mut updated = saved.clone();
-        change(&mut updated);
+        change(&mut updated)?;
         write_json(&self.directory.join("settings.json"), &updated)?;
         *saved = updated;
+        Ok(())
+    }
+
+    pub fn replace_connection(&self, id: &str, endpoint: Option<&Endpoint>) -> Result<()> {
+        self.change_settings(|settings| {
+            let new_id = endpoint.map_or_else(|| id.to_owned(), Endpoint::key);
+            ensure!(
+                new_id == id || !settings.endpoints.iter().any(|e| e.key() == new_id),
+                "此连接地址已有设备记录，请编辑已有记录"
+            );
+            settings.endpoints.retain(|e| e.key() != id);
+            if let Some(endpoint) = endpoint {
+                settings.endpoints.push(endpoint.clone());
+            }
+            if new_id != id {
+                if let Some(alias) = settings.aliases.remove(id) {
+                    settings.aliases.insert(new_id.clone(), alias);
+                }
+                if let Some(info) = settings.device_info.remove(id) {
+                    settings.device_info.insert(new_id, info);
+                }
+            }
+            Ok(())
+        })
+    }
+
+    pub fn forget_wireless(&self, id: &str) -> Result<()> {
+        let mut settings = self.settings.lock().expect("settings lock poisoned");
+        let mut paired = self.paired.lock().expect("pairing lock poisoned");
+        let mut updated_settings = settings.clone();
+        updated_settings.endpoints.retain(|e| e.key() != id);
+        updated_settings.aliases.remove(id);
+        updated_settings.device_info.remove(id);
+        let mut updated_paired = paired.clone();
+        let removed = id
+            .strip_prefix("tls:")
+            .and_then(|key| updated_paired.remove(key))
+            .is_some();
+        let pairing_path = self.directory.join("paired.json");
+        if removed {
+            write_json(&pairing_path, &updated_paired)?;
+        }
+        if let Err(error) = write_json(&self.directory.join("settings.json"), &updated_settings) {
+            if removed && let Err(rollback) = write_json(&pairing_path, &*paired) {
+                *paired = updated_paired;
+                anyhow::bail!(
+                    "配对记录已删除，但连接配置清理失败：{error:#}；恢复配对记录也失败：{rollback:#}。请修复数据目录权限后重试删除"
+                );
+            }
+            return Err(error);
+        }
+        *settings = updated_settings;
+        *paired = updated_paired;
         Ok(())
     }
 

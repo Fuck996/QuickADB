@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -84,6 +84,7 @@ impl DeviceStatus {
 #[derive(Clone, Debug)]
 pub struct Device {
     pub id: String,
+    pub revision: u64,
     pub name: String,
     pub model: String,
     pub serial: String,
@@ -169,6 +170,8 @@ pub struct Job {
 #[derive(Clone, Default)]
 pub struct Snapshot {
     pub devices: Vec<Device>,
+    pub managing: BTreeSet<String>,
+    pub(crate) device_revisions: BTreeMap<String, u64>,
     pub jobs: Vec<Job>,
     pub preparation: Option<ApkPreparation>,
     pub discovered: Vec<DiscoveredDevice>,

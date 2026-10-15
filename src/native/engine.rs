@@ -61,13 +61,22 @@ enum WirelessTarget {
     Address(Endpoint),
 }
 
+enum DeviceChange {
+    Connection(Option<Endpoint>),
+    Forget,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("当前连接已被设备管理操作取消")]
+struct DeviceChangeCanceled;
+
 struct Engine {
     state: Mutex<Snapshot>,
     storage: Arc<Storage>,
     credential: Arc<RsaAdbCredential>,
     clients: AsyncMutex<BTreeMap<String, Arc<AdbClient>>>,
     usb: Mutex<BTreeMap<String, UsbDeviceInfo>>,
-    connecting: Mutex<BTreeSet<String>>,
+    connecting: Mutex<BTreeMap<String, CancellationToken>>,
     connection_locks: AsyncMutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     lanes: AsyncMutex<BTreeMap<String, mpsc::UnboundedSender<QueueItem>>>,
     cancellations: Mutex<BTreeMap<u64, CancellationToken>>,
@@ -92,7 +101,7 @@ impl Backend {
             }),
             clients: AsyncMutex::new(BTreeMap::new()),
             usb: Mutex::new(BTreeMap::new()),
-            connecting: Mutex::new(BTreeSet::new()),
+            connecting: Mutex::new(BTreeMap::new()),
             connection_locks: AsyncMutex::new(BTreeMap::new()),
             lanes: AsyncMutex::new(BTreeMap::new()),
             cancellations: Mutex::new(BTreeMap::new()),
@@ -171,6 +180,60 @@ impl Backend {
 
     pub fn connect(&self, endpoint: Endpoint) {
         self.spawn(self.engine.clone().connect_endpoint(endpoint));
+    }
+
+    pub fn update_connection(&self, id: String, endpoint: Option<Endpoint>) {
+        self.change_device(id, DeviceChange::Connection(endpoint));
+    }
+
+    pub fn forget_device(&self, id: String) {
+        self.change_device(id, DeviceChange::Forget);
+    }
+
+    fn change_device(&self, id: String, change: DeviceChange) {
+        let new_id = match &change {
+            DeviceChange::Connection(Some(endpoint)) => endpoint.key(),
+            _ => id.clone(),
+        };
+        if let Err(error) = self.engine.reserve_device_change(&id, &new_id, &change) {
+            self.engine.notice(&format!("设备操作未执行：{error:#}"));
+            return;
+        }
+        if let Some(cancel) = self
+            .engine
+            .connecting
+            .lock()
+            .expect("connecting lock poisoned")
+            .get(&id)
+        {
+            cancel.cancel();
+        }
+        let engine = self.engine.clone();
+        self.spawn(async move {
+            let result = engine.clone().change_device(&id, &new_id, &change).await;
+            {
+                let mut state = engine.state.lock().expect("state lock poisoned");
+                state.managing.remove(&id);
+                state.managing.remove(&new_id);
+            }
+            match result {
+                Ok(()) => match change {
+                    DeviceChange::Forget => engine.notice("已删除本机设备记录"),
+                    DeviceChange::Connection(endpoint) => {
+                        engine.notice("连接配置已保存，正在连接设备");
+                        match endpoint {
+                            Some(endpoint) => engine.connect_endpoint(endpoint).await,
+                            None => {
+                                engine
+                                    .connect_paired(new_id.trim_start_matches("tls:").into())
+                                    .await
+                            }
+                        }
+                    }
+                },
+                Err(error) => engine.notice(&format!("设备操作失败：{error:#}")),
+            }
+        });
     }
 
     pub fn pair(
@@ -542,6 +605,124 @@ impl Drop for Backend {
 }
 
 impl Engine {
+    fn reserve_device_change(&self, id: &str, new_id: &str, change: &DeviceChange) -> Result<()> {
+        let mut state = self.state.lock().expect("state lock poisoned");
+        let device = state
+            .devices
+            .iter()
+            .find(|d| d.id == id)
+            .context("设备记录已不存在")?;
+        ensure!(
+            device.endpoint.is_some() || id.starts_with("tls:"),
+            "USB 设备不保存无线连接配置"
+        );
+        ensure!(
+            !state.managing.contains(id) && !state.managing.contains(new_id),
+            "设备记录正在处理中"
+        );
+        ensure!(
+            !state
+                .jobs
+                .iter()
+                .any(|j| j.device_id == id && j.stage.active()),
+            "此设备仍有安装任务，请先等待任务结束或取消任务"
+        );
+        if let DeviceChange::Connection(endpoint) = change {
+            match endpoint {
+                Some(endpoint) => {
+                    ensure!(
+                        !endpoint.host.trim().is_empty() && endpoint.port > 0,
+                        "设备地址或端口无效"
+                    );
+                    ensure!(
+                        endpoint.paired_id.as_deref() == id.strip_prefix("tls:"),
+                        "编辑连接不能更换设备的配对身份"
+                    );
+                }
+                None => ensure!(id.starts_with("tls:"), "TCP 连接必须填写地址与端口"),
+            }
+            ensure!(
+                new_id == id || !state.devices.iter().any(|d| d.id == new_id),
+                "此连接地址已有设备记录，请编辑已有记录"
+            );
+        }
+        for key in BTreeSet::from([id, new_id]) {
+            state.managing.insert(key.into());
+            *state.device_revisions.entry(key.into()).or_default() += 1;
+        }
+        let revision = state.device_revisions[id];
+        state
+            .devices
+            .iter_mut()
+            .find(|d| d.id == id)
+            .expect("validated device")
+            .revision = revision;
+        Ok(())
+    }
+
+    async fn connection_gate(&self, id: &str) -> Arc<AsyncMutex<()>> {
+        self.connection_locks
+            .lock()
+            .await
+            .entry(id.into())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
+    }
+
+    async fn change_device(
+        self: Arc<Self>,
+        id: &str,
+        new_id: &str,
+        change: &DeviceChange,
+    ) -> Result<()> {
+        let gate = self.connection_gate(id).await;
+        let _guard = gate.lock().await;
+        let client = self.clients.lock().await.get(id).cloned();
+        if let Some(client) = client {
+            client
+                .close()
+                .await
+                .context("关闭旧连接失败，尚未更改设备记录")?;
+            self.clients.lock().await.remove(id);
+        }
+        match change {
+            DeviceChange::Forget => {
+                self.storage.forget_wireless(id)?;
+                self.state
+                    .lock()
+                    .expect("state lock poisoned")
+                    .devices
+                    .retain(|d| d.id != id);
+            }
+            DeviceChange::Connection(endpoint) => {
+                self.storage.replace_connection(id, endpoint.as_ref())?;
+                let settings = self.storage.settings();
+                let mut state = self.state.lock().expect("state lock poisoned");
+                let revision = state.device_revisions[new_id];
+                let device = state
+                    .devices
+                    .iter_mut()
+                    .find(|d| d.id == id)
+                    .context("设备记录已不存在")?;
+                device.id = new_id.into();
+                device.revision = revision;
+                device.endpoint = endpoint.clone();
+                device.status = DeviceStatus::Offline;
+                device.detail = "连接配置已更新".into();
+                if device.serial.is_empty()
+                    && let Some(endpoint) = endpoint
+                {
+                    device.model = format!("{}:{}", endpoint.host, endpoint.port);
+                }
+                device.name = settings
+                    .device_alias(new_id, &device.serial)
+                    .unwrap_or(&device.model)
+                    .into();
+            }
+        }
+        Ok(())
+    }
+
     fn notice(&self, message: &str) {
         let log = self.storage.log(message);
         let message = match log {
@@ -567,16 +748,21 @@ impl Engine {
         }
     }
 
-    fn start_connect(&self, id: &str, name: &str, endpoint: Option<Endpoint>) -> bool {
-        if !self
-            .connecting
-            .lock()
-            .expect("connecting lock poisoned")
-            .insert(id.to_owned())
-        {
-            return false;
-        }
+    fn start_connect(
+        &self,
+        id: &str,
+        name: &str,
+        endpoint: Option<Endpoint>,
+        parent: &CancellationToken,
+    ) -> Option<CancellationToken> {
         let mut state = self.state.lock().expect("state lock poisoned");
+        let mut connecting = self.connecting.lock().expect("connecting lock poisoned");
+        if state.managing.contains(id) || connecting.contains_key(id) {
+            return None;
+        }
+        let cancel = parent.child_token();
+        connecting.insert(id.into(), cancel.clone());
+        let revision = state.device_revisions.get(id).copied().unwrap_or_default();
         if let Some(device) = state.devices.iter_mut().find(|d| d.id == id) {
             device.status = DeviceStatus::Connecting;
             device.detail.clear();
@@ -584,6 +770,7 @@ impl Engine {
         } else {
             state.devices.push(Device {
                 id: id.into(),
+                revision,
                 name: name.into(),
                 model: name.into(),
                 serial: String::new(),
@@ -599,13 +786,13 @@ impl Engine {
                 endpoint,
             });
         }
-        true
+        Some(cancel)
     }
 
     async fn connect_usb(self: Arc<Self>, id: String, info: UsbDeviceInfo) {
-        if !self.start_connect(&id, &info.description, None) {
+        let Some(cancel) = self.start_connect(&id, &info.description, None, &self.stop) else {
             return;
-        }
+        };
         let result = async {
             let transport = UsbTransport::connect_device(
                 &info,
@@ -637,26 +824,54 @@ impl Engine {
             Ok::<_, anyhow::Error>(client)
         }
         .await;
-        let _ = self.finish_connect(id, result, &self.stop).await;
+        let _ = self.finish_connect(id, result, &cancel).await;
     }
 
-    async fn connect_paired(self: Arc<Self>, device_id: String) {
-        if let Err(error) = self
-            .clone()
-            .connect_wireless(WirelessTarget::Paired(device_id), &self.stop)
-            .await
-        {
-            self.notice(&format!("无线连接失败：{error:#}"));
+    fn connect_paired(
+        self: Arc<Self>,
+        device_id: String,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let revision = self
+            .state
+            .lock()
+            .expect("state lock poisoned")
+            .device_revisions
+            .get(&format!("tls:{device_id}"))
+            .copied()
+            .unwrap_or_default();
+        async move {
+            if let Err(error) = self
+                .clone()
+                .connect_wireless(WirelessTarget::Paired(device_id), &self.stop, revision)
+                .await
+                && !error.is::<DeviceChangeCanceled>()
+            {
+                self.notice(&format!("无线连接失败：{error:#}"));
+            }
         }
     }
 
-    async fn connect_endpoint(self: Arc<Self>, endpoint: Endpoint) {
-        if let Err(error) = self
-            .clone()
-            .connect_wireless(WirelessTarget::Address(endpoint), &self.stop)
-            .await
-        {
-            self.notice(&format!("无线连接失败：{error:#}"));
+    fn connect_endpoint(
+        self: Arc<Self>,
+        endpoint: Endpoint,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let revision = self
+            .state
+            .lock()
+            .expect("state lock poisoned")
+            .device_revisions
+            .get(&endpoint.key())
+            .copied()
+            .unwrap_or_default();
+        async move {
+            if let Err(error) = self
+                .clone()
+                .connect_wireless(WirelessTarget::Address(endpoint), &self.stop, revision)
+                .await
+                && !error.is::<DeviceChangeCanceled>()
+            {
+                self.notice(&format!("无线连接失败：{error:#}"));
+            }
         }
     }
 
@@ -664,7 +879,25 @@ impl Engine {
         self: Arc<Self>,
         target: WirelessTarget,
         cancel: &CancellationToken,
+        revision: u64,
     ) -> Result<Arc<AdbClient>> {
+        let target_id = match &target {
+            WirelessTarget::Address(endpoint) => endpoint.key(),
+            WirelessTarget::Paired(id) => format!("tls:{id}"),
+        };
+        {
+            let state = self.state.lock().expect("state lock poisoned");
+            if state.managing.contains(&target_id)
+                || state
+                    .device_revisions
+                    .get(&target_id)
+                    .copied()
+                    .unwrap_or_default()
+                    != revision
+            {
+                return Err(DeviceChangeCanceled.into());
+            }
+        }
         let (id, endpoint) = match &target {
             WirelessTarget::Paired(device_id) => {
                 ensure!(
@@ -685,18 +918,29 @@ impl Engine {
             }
             WirelessTarget::Address(endpoint) => (endpoint.key(), Some(endpoint.clone())),
         };
-        let gate = self
-            .connection_locks
-            .lock()
-            .await
-            .entry(id.clone())
-            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-            .clone();
+        let gate = self.connection_gate(&id).await;
         let _connection = tokio::select! {
             _ = cancel.cancelled() => anyhow::bail!("连接已取消"),
             _ = self.stop.cancelled() => anyhow::bail!("应用正在退出"),
             guard = gate.lock() => guard,
         };
+        {
+            let state = self.state.lock().expect("state lock poisoned");
+            if state.managing.contains(&id)
+                || state.device_revisions.get(&id).copied().unwrap_or_default() != revision
+            {
+                return Err(DeviceChangeCanceled.into());
+            }
+        }
+        if let WirelessTarget::Paired(device_id) = &target {
+            ensure!(
+                self.storage
+                    .paired_devices()
+                    .iter()
+                    .any(|d| d.device_id == *device_id),
+                "此无线设备已删除配对记录，请重新配对"
+            );
+        }
         {
             let mut clients = self.clients.lock().await;
             if let Some(client) = clients.get(&id) {
@@ -706,10 +950,9 @@ impl Engine {
                 clients.remove(&id);
             }
         }
-        ensure!(
-            self.start_connect(&id, &id, endpoint),
-            "设备连接请求正在处理中"
-        );
+        let attempt_cancel = self
+            .start_connect(&id, &id, endpoint, cancel)
+            .ok_or(DeviceChangeCanceled)?;
         let attempt = async {
             match target {
                 WirelessTarget::Address(endpoint) => self.dial_endpoint(&id, endpoint).await,
@@ -755,13 +998,18 @@ impl Engine {
             }
         };
         let result = tokio::select! {
+            _ = attempt_cancel.cancelled() => Err(anyhow::anyhow!("连接已取消")),
             _ = cancel.cancelled() => Err(anyhow::anyhow!("连接已取消")),
             _ = self.stop.cancelled() => Err(anyhow::anyhow!("应用正在退出")),
             result = tokio::time::timeout(Duration::from_secs(30), attempt) => {
                 result.context("无线连接超时，请检查手机无线调试与网络").and_then(|result| result)
             },
         };
-        self.finish_connect(id, result, cancel).await
+        let result = self.finish_connect(id, result, &attempt_cancel).await;
+        if attempt_cancel.is_cancelled() && !cancel.is_cancelled() && !self.stop.is_cancelled() {
+            return Err(DeviceChangeCanceled.into());
+        }
+        result
     }
 
     async fn dial_endpoint(self: &Arc<Self>, id: &str, endpoint: Endpoint) -> Result<AdbClient> {
@@ -1188,7 +1436,7 @@ impl Engine {
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| group[0].package.clone())
                 };
-                let job = Job {
+                let mut job = Job {
                     id,
                     device_id: target.id.clone(),
                     device_name: target.name.clone(),
@@ -1206,11 +1454,27 @@ impl Engine {
                     .lock()
                     .expect("cancellation lock poisoned")
                     .insert(id, cancel.clone());
-                self.state
-                    .lock()
-                    .expect("state lock poisoned")
-                    .jobs
-                    .push(job.clone());
+                let accepted = {
+                    let mut state = self.state.lock().expect("state lock poisoned");
+                    let accepted = !state.managing.contains(&target.id)
+                        && state
+                            .devices
+                            .iter()
+                            .any(|d| d.id == target.id && d.revision == target.revision);
+                    if !accepted {
+                        job.stage = JobStage::Failed;
+                        job.detail = "目标设备记录已删除或连接配置已更改，尚未传输 APK。请重新选择设备后安装".into();
+                    }
+                    state.jobs.push(job.clone());
+                    accepted
+                };
+                if !accepted {
+                    self.cancellations
+                        .lock()
+                        .expect("cancellation lock poisoned")
+                        .remove(&id);
+                    continue;
+                }
                 if sender
                     .send(QueueItem {
                         job,
@@ -1326,17 +1590,34 @@ impl Engine {
         cancel: &CancellationToken,
     ) -> Result<Arc<AdbClient>> {
         ensure!(!cancel.is_cancelled(), "安装已取消");
+        ensure!(
+            self.state
+                .lock()
+                .expect("state lock poisoned")
+                .devices
+                .iter()
+                .any(|d| d.id == target.id && d.revision == target.revision),
+            "目标设备记录已删除或连接配置已更改，请重新选择设备"
+        );
         let current = self.clients.lock().await.get(&target.id).cloned();
         let client = if let Some(client) = current.filter(|c| c.state() != ConnectionState::Closed)
         {
             client
         } else if let Some(device_id) = target.id.strip_prefix("tls:") {
             self.clone()
-                .connect_wireless(WirelessTarget::Paired(device_id.to_owned()), cancel)
+                .connect_wireless(
+                    WirelessTarget::Paired(device_id.to_owned()),
+                    cancel,
+                    target.revision,
+                )
                 .await?
         } else if let Some(endpoint) = &target.endpoint {
             self.clone()
-                .connect_wireless(WirelessTarget::Address(endpoint.clone()), cancel)
+                .connect_wireless(
+                    WirelessTarget::Address(endpoint.clone()),
+                    cancel,
+                    target.revision,
+                )
                 .await?
         } else {
             anyhow::bail!("原目标 USB 设备已断开，请接回原设备")
@@ -1385,6 +1666,7 @@ fn saved_devices(storage: &Storage) -> Vec<Device> {
                         })
                 });
             Device {
+                revision: 0,
                 name: settings
                     .device_alias(&id, &serial)
                     .map(str::to_owned)

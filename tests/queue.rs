@@ -636,6 +636,11 @@ fn background_check_recovers_and_reports_a_new_failure_without_global_noise() {
     assert!(backend.snapshot().notice.is_empty());
     wait_for_timeout(&backend, Duration::from_secs(13), |s| {
         s.devices[0].detail.is_empty()
+            && std::fs::read_to_string(storage.directory.join("quickadb.log"))
+                .expect("log")
+                .matches("后台连接检查已恢复")
+                .count()
+                == 1
     });
     let log = std::fs::read_to_string(storage.directory.join("quickadb.log")).expect("log");
     assert_eq!(log.matches("后台连接检查已恢复").count(), 1);
@@ -645,6 +650,11 @@ fn background_check_recovers_and_reports_a_new_failure_without_global_noise() {
     assert!(backend.snapshot().notice.is_empty());
     wait_for_timeout(&backend, Duration::from_secs(13), |s| {
         s.devices[0].detail.is_empty()
+            && std::fs::read_to_string(storage.directory.join("quickadb.log"))
+                .expect("log")
+                .matches("后台连接检查已恢复")
+                .count()
+                == 2
     });
     let snapshot = backend.snapshot();
     assert_eq!(snapshot.devices[0].status, DeviceStatus::Online);
