@@ -232,7 +232,14 @@ impl AdbTransport for WirelessTransport {
         let deadline = self.config.write_timeout;
         let result = match &mut self.connection {
             Connection::Plain(stream) => time::timeout(deadline, stream.write_all(&encoded)).await,
-            Connection::Tls(stream) => time::timeout(deadline, stream.write_all(&encoded)).await,
+            Connection::Tls(stream) => {
+                time::timeout(deadline, async {
+                    stream.write_all(&encoded).await?;
+                    // Flush the final TLS record before waiting for the peer's reply.
+                    stream.flush().await
+                })
+                .await
+            }
             Connection::Closed => {
                 return Err(AdbTransportError::ConnectionClosed {
                     operation: TransportOperation::Write,

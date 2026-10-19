@@ -529,6 +529,7 @@ async fn run_connected_session(
                             config.delayed_ack,
                             config.burst_mode,
                             config.delayed_ack_receive_window,
+                            config.max_payload,
                         ).await {
                             return SessionEnd::Disconnected(reason);
                         }
@@ -801,11 +802,9 @@ async fn acknowledge_inbound(
     if let Some(entry) = router.streams.get_mut(&local_id) {
         entry.inbound_unacknowledged_packets =
             entry.inbound_unacknowledged_packets.saturating_sub(1);
-        if delayed_ack {
-            entry.inbound_unacknowledged_bytes = entry
-                .inbound_unacknowledged_bytes
-                .saturating_sub(u64::from(bytes));
-        }
+        entry.inbound_unacknowledged_bytes = entry
+            .inbound_unacknowledged_bytes
+            .saturating_sub(u64::from(bytes));
     }
     let remove_closed_ack = router
         .closed_inbound_acks
@@ -813,11 +812,9 @@ async fn acknowledge_inbound(
         .is_some_and(|entry| {
             entry.inbound_unacknowledged_packets =
                 entry.inbound_unacknowledged_packets.saturating_sub(1);
-            if delayed_ack {
-                entry.inbound_unacknowledged_bytes = entry
-                    .inbound_unacknowledged_bytes
-                    .saturating_sub(u64::from(bytes));
-            }
+            entry.inbound_unacknowledged_bytes = entry
+                .inbound_unacknowledged_bytes
+                .saturating_sub(u64::from(bytes));
             entry.inbound_unacknowledged_packets == 0
         });
     if remove_closed_ack {
@@ -873,6 +870,7 @@ async fn handle_packet(
     delayed_ack: bool,
     burst_mode: bool,
     delayed_ack_receive_window: u32,
+    max_payload: usize,
 ) -> Result<(), String> {
     match packet.command {
         AdbCommand::Okay => handle_okay(transport, router, packet, delayed_ack, burst_mode).await,
@@ -883,6 +881,7 @@ async fn handle_packet(
                 packet,
                 delayed_ack,
                 delayed_ack_receive_window,
+                max_payload,
             )
             .await
         }
@@ -966,6 +965,7 @@ async fn handle_incoming_write(
     packet: AdbPacket,
     delayed_ack: bool,
     delayed_ack_receive_window: u32,
+    max_payload: usize,
 ) -> Result<(), String> {
     let remote_id = packet.arg0;
     let local_id = packet.arg1;
@@ -988,22 +988,23 @@ async fn handle_incoming_write(
     }
     let payload_bytes =
         u64::try_from(packet.payload.len()).map_err(|_| "payload length overflow")?;
-    let exceeds_window = delayed_ack
-        && entry
-            .inbound_unacknowledged_bytes
-            .saturating_add(payload_bytes)
-            > u64::from(delayed_ack_receive_window);
-    if (!delayed_ack && entry.inbound_unacknowledged_packets != 0)
-        || exceeds_window
-        || entry.incoming_sender.send(packet.payload).is_err()
-    {
+    // AOSP can enqueue several small WRTE packets before the consumer drains them.
+    // Limit buffered bytes, including one packet that can cross the queue threshold.
+    let receive_window = if delayed_ack {
+        u64::from(delayed_ack_receive_window)
+    } else {
+        (max_payload as u64) * 2
+    };
+    let exceeds_window = entry
+        .inbound_unacknowledged_bytes
+        .saturating_add(payload_bytes)
+        > receive_window;
+    if exceeds_window || entry.incoming_sender.send(packet.payload).is_err() {
         return close_invalid_stream(transport, router, local_id, remote_id).await;
     }
-    if delayed_ack {
-        entry.inbound_unacknowledged_bytes = entry
-            .inbound_unacknowledged_bytes
-            .saturating_add(payload_bytes);
-    }
+    entry.inbound_unacknowledged_bytes = entry
+        .inbound_unacknowledged_bytes
+        .saturating_add(payload_bytes);
     entry.inbound_unacknowledged_packets = entry.inbound_unacknowledged_packets.saturating_add(1);
     Ok(())
 }

@@ -65,6 +65,8 @@ pub struct DeviceOptions {
     pub features: &'static str,
     pub result: &'static str,
     pub delay_ack: Duration,
+    pub read_delay: Duration,
+    pub max_payload: u32,
     pub disconnect_after_upload: bool,
     pub serial: &'static str,
     pub device_info: Option<&'static str>,
@@ -79,6 +81,8 @@ impl Default for DeviceOptions {
             features: "cmd,abb_exec",
             result: "Success\n",
             delay_ack: Duration::ZERO,
+            read_delay: Duration::ZERO,
+            max_payload: 4096,
             disconnect_after_upload: false,
             serial: "QUICKADB-TEST",
             device_info: None,
@@ -122,10 +126,14 @@ struct StreamState {
 
 impl DeviceServer {
     pub fn start(options: DeviceOptions) -> Self {
+        Self::start_on_port(options, 0)
+    }
+
+    pub fn start_on_port(options: DeviceOptions, port: u16) -> Self {
         let listener = TcpListener::bind(if options.tls {
-            "0.0.0.0:0"
+            ("0.0.0.0", port)
         } else {
-            "127.0.0.1:0"
+            ("127.0.0.1", port)
         })
         .expect("fixture bind");
         let port = listener.local_addr().expect("address").port();
@@ -189,12 +197,16 @@ impl DeviceServer {
                 &mut socket,
                 AdbCommand::Connect,
                 ADB_VERSION,
-                4096,
+                options.max_payload,
                 banner.as_bytes(),
             );
             let mut streams = BTreeMap::<u32, StreamState>::new();
             let mut heartbeat_attempts = 0;
-            while let Ok(packet) = read_packet(&mut socket) {
+            loop {
+                thread::sleep(options.read_delay);
+                let Ok(packet) = read_packet(&mut socket) else {
+                    break;
+                };
                 let local = packet.arg0;
                 let remote = local + 100;
                 match packet.command {
@@ -252,7 +264,16 @@ impl DeviceServer {
                                 reply.into_bytes()
                             };
                             if !reply.is_empty() {
-                                send(&mut socket, AdbCommand::Write, remote, local, &reply);
+                                // Android can deliver stdout and exit in separate consecutive WRTEs.
+                                for chunk in
+                                    reply.chunks(if options.features.contains("shell_v2") {
+                                        14
+                                    } else {
+                                        reply.len()
+                                    })
+                                {
+                                    send(&mut socket, AdbCommand::Write, remote, local, chunk);
+                                }
                                 if matches!(heartbeat, Some(HeartbeatReply::CloseAfterOutput)) {
                                     send(&mut socket, AdbCommand::Close, remote, local, &[]);
                                 }

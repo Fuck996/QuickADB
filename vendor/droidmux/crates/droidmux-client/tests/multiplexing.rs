@@ -198,6 +198,87 @@ async fn open_stream(
 }
 
 #[tokio::test]
+async fn classic_small_writes_can_queue_before_read_and_close() {
+    let (client, inbound, mut writes, _) = connected_client().await;
+    let stream = open_stream(
+        &client,
+        &inbound,
+        &mut writes,
+        "shell:echo quickadb",
+        101,
+        None,
+    )
+    .await;
+    for payload in [b"quickadb\n".as_slice(), &[3, 1, 0, 0, 0, 0]] {
+        inbound
+            .send(Ok(AdbPacket::new(
+                AdbCommand::Write,
+                stream.remote_id(),
+                stream.local_id(),
+                Bytes::copy_from_slice(payload),
+            )
+            .expect("WRTE")))
+            .expect("deliver WRTE");
+    }
+    inbound
+        .send(Ok(empty_packet(
+            AdbCommand::Close,
+            stream.remote_id(),
+            stream.local_id(),
+        )))
+        .expect("CLSE");
+    assert_eq!(receive_packet(&mut writes).await.command, AdbCommand::Close);
+    assert_eq!(
+        stream.read().await.expect("stdout"),
+        Some(Bytes::from_static(b"quickadb\n"))
+    );
+    assert_eq!(receive_packet(&mut writes).await.command, AdbCommand::Okay);
+    assert_eq!(
+        stream.read().await.expect("exit"),
+        Some(Bytes::from_static(&[3, 1, 0, 0, 0, 0]))
+    );
+    assert_eq!(receive_packet(&mut writes).await.command, AdbCommand::Okay);
+    assert_eq!(stream.read().await.expect("closed"), None);
+    client.close().await.expect("close session");
+}
+
+#[tokio::test]
+async fn classic_receive_queue_is_bounded_and_acknowledged_bytes_release_capacity() {
+    let (client, inbound, mut writes, _) = connected_client().await;
+    let stream = open_stream(&client, &inbound, &mut writes, "shell:bounded", 101, None).await;
+    for _ in 0..2 {
+        inbound
+            .send(Ok(AdbPacket::new(
+                AdbCommand::Write,
+                stream.remote_id(),
+                stream.local_id(),
+                Bytes::from(vec![1; 4096]),
+            )
+            .expect("WRTE")))
+            .expect("send");
+    }
+    assert_eq!(
+        stream.read().await.expect("first").expect("bytes").len(),
+        4096
+    );
+    assert_eq!(receive_packet(&mut writes).await.command, AdbCommand::Okay);
+    for _ in 0..2 {
+        inbound
+            .send(Ok(AdbPacket::new(
+                AdbCommand::Write,
+                stream.remote_id(),
+                stream.local_id(),
+                Bytes::from(vec![2; 4096]),
+            )
+            .expect("WRTE")))
+            .expect("send");
+    }
+    assert_eq!(receive_packet(&mut writes).await.command, AdbCommand::Close);
+    assert_eq!(client.state(), ConnectionState::Connected);
+    client.close().await.expect("close session");
+}
+
+#[tokio::test]
 async fn final_payload_remains_readable_when_remote_close_arrives_first() {
     let (client, inbound, mut writes, _) = connected_client().await;
     let stream = open_stream(

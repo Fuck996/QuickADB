@@ -16,6 +16,59 @@ use support::{DeviceOptions, DeviceServer, TempDirectory};
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
+async fn tls_backpressure_flushes_the_final_upload_before_waiting_for_ack() {
+    let directory = TempDirectory::new();
+    let apk = directory.apk("tls-backpressure.apk", 8 * 1024 * 1024 + 777);
+    let expected = std::fs::read(&apk.path).expect("APK");
+    let server = DeviceServer::start(DeviceOptions {
+        tls: true,
+        max_payload: 1024 * 1024,
+        read_delay: Duration::from_millis(10),
+        idle_timeout: Duration::from_secs(8),
+        ..Default::default()
+    });
+    let credential = Arc::new(droidmux::auth::RsaAdbCredential::generate("tls-test").expect("RSA"));
+    let transport = droidmux::pairing::WirelessTransport::connect(
+        "127.0.0.1",
+        server.port,
+        &credential,
+        droidmux::pairing::WirelessTransportConfig::default(),
+    )
+    .await
+    .expect("TLS transport");
+    let client = Arc::new(
+        droidmux::client::AdbClient::connect(Box::new(transport), credential)
+            .await
+            .expect("client"),
+    );
+    let progress = Arc::new(Mutex::new(Vec::new()));
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        install(
+            client.clone(),
+            &[apk],
+            false,
+            CancellationToken::new(),
+            |p| progress.lock().expect("progress").push(p),
+        ),
+    )
+    .await;
+    client.close().await.expect("close");
+    result.expect("upload deadline").expect("installation");
+    assert_eq!(
+        server.records.lock().expect("records").uploads,
+        vec![expected.clone()]
+    );
+    assert!(
+        progress
+            .lock()
+            .expect("progress")
+            .iter()
+            .any(|p| p.stage == JobStage::Transferring && p.bytes == expected.len() as u64)
+    );
+}
+
+#[tokio::test]
 async fn streaming_uses_official_arguments_and_exact_file_bytes() {
     let directory = TempDirectory::new();
     let apk = directory.apk("中文 路径.apk", 24017);

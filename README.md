@@ -2,13 +2,13 @@
 
 常驻 Windows 托盘的 APK 安装抽屉。使用原生 Rust 应用与静态 ADB 协议库，运行时不释放 adb.exe 或应用 DLL，不要求安装 .NET，也不依赖外部 ADB server。
 
-当前版本：[0.9.7](https://github.com/Fuck996/QuickADB/releases/tag/v0.9.7)，适用于 Windows x64。
+当前版本：[0.9.8](https://github.com/Fuck996/QuickADB/releases/tag/v0.9.8)，适用于 Windows x64。
 
 许可：[GPL-3.0-only](LICENSE)，来源保留条款见 [NOTICE](NOTICE)。
 
 ## 下载
 
-[下载 QuickADB-0.9.7-x64.exe](https://github.com/Fuck996/QuickADB/releases/download/v0.9.7/QuickADB-0.9.7-x64.exe)，直接运行，无需安装。其他版本及校验值见 [GitHub Releases](https://github.com/Fuck996/QuickADB/releases)，本版更新说明见 [0.9.7 发布说明](docs/releases/0.9.7.md)。
+[下载 QuickADB-0.9.8-x64.exe](https://github.com/Fuck996/QuickADB/releases/download/v0.9.8/QuickADB-0.9.8-x64.exe)，直接运行，无需安装。其他版本及校验值见 [GitHub Releases](https://github.com/Fuck996/QuickADB/releases)，本版更新说明见 [0.9.8 发布说明](docs/releases/0.9.8.md)。
 
 ## 功能
 
@@ -19,7 +19,7 @@
 - 托盘抽屉、图钉固定置顶、拖动定位，以及可调整大小和贴靠的 Windows 标准窗口。
 - 可选开机启动、深浅主题；单 EXE 使用，运行依赖静态编译。
 
-0.9.7 修复标准窗口侧栏的详情点击，并支持编辑连接、删除本机配对或连接记录。空闲无线断线作为普通离线状态处理，操作提示 8 秒后自动收起，安装按钮保持在可见区域。安装中断仍在对应任务中显示失败或结果未知，原始原因保留在详情与日志。
+0.9.8 修复无线 TLS 发送缓冲未排空造成的传输停顿，以及连续命令输出被误判为异常、导致连接偶发失败的问题。已配对设备的连接广播仍有效时，空闲掉线或首次连接失败会自动间隔重试；用户主动断开仍保持断开。空闲断线不会挂全局报错，安装中断仍在对应任务中显示真实失败或结果未知。
 
 ## 使用
 
@@ -66,7 +66,7 @@ Windows x64，PowerShell 7，Rust 1.95+，Visual Studio 2022 C++ Build Tools 与
 
 `scripts/Publish-Source.ps1` 从已提交版本同时生成完整对应源码和许可附件，并在成功或失败退出时清理自身暂存目录。
 
-0.9.7 已通过 30 项应用协议与持久化集成回归，原生窗口交互及具体范围见 [验证记录](docs/verification.md)。协议夹具通过不代表真实手机通过；USB 授权、手机无线配对、签名 APK 的真实安装和机型驱动兼容性仍需真机验收。
+0.9.8 的协议回归与真机诊断范围见 [验证记录](docs/verification.md)。已在一台已配对 Android 设备上验证连续命令和真实确认的无线传输；USB 授权、手机首次配对、签名 APK 的真实安装和多机型兼容性仍需分别验收。
 
 ## 开源许可与引用
 
@@ -78,7 +78,7 @@ Windows x64，PowerShell 7，Rust 1.95+，Visual Studio 2022 C++ Build Tools 与
 
 ADB 底层、USB 和界面等使用第三方库，保留其原作者与原许可；完整来源见 [THIRD_PARTY.md](THIRD_PARTY.md) 和 [第三方许可全文](assets/ThirdPartyNotices.txt)，不把第三方代码宣称为本项目原创。
 
-完整 [0.9.7 对应源码包](https://github.com/Fuck996/QuickADB/releases/download/v0.9.7/QuickADB-0.9.7-source.zip) 包含锁定依赖（含静态 libusb）、资源、许可和构建脚本；解压后使用 `scripts/Build-Source.ps1 -Release` 离线构建，另需安装前述通用构建工具。Release 同时提供法律声明。仅 GitHub 自动生成的仓库源码 ZIP 不包含所有注册表依赖，请使用完整对应源码包。
+完整 [0.9.8 对应源码包](https://github.com/Fuck996/QuickADB/releases/download/v0.9.8/QuickADB-0.9.8-source.zip) 包含锁定依赖（含静态 libusb）、资源、许可和构建脚本；解压后使用 `scripts/Build-Source.ps1 -Release` 离线构建，另需安装前述通用构建工具。Release 同时提供法律声明。仅 GitHub 自动生成的仓库源码 ZIP 不包含所有注册表依赖，请使用完整对应源码包。
 
 ## Windows 发布者提示
 

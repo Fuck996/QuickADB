@@ -50,6 +50,82 @@ fn prepared_revision(backend: &Backend) -> u64 {
 }
 
 #[test]
+fn paired_device_retries_without_a_new_mdns_event_and_reconnects_after_idle_loss() {
+    let directory = TempDirectory::new();
+    let listener = std::net::TcpListener::bind("0.0.0.0:0").expect("reserve port");
+    let port = listener.local_addr().expect("port").port();
+    drop(listener);
+    let guid = format!("adb-retry-{}-{port}", std::process::id());
+    let storage = Storage::open(directory.0.join("data")).expect("storage");
+    let runtime = tokio::runtime::Runtime::new().expect("setup runtime");
+    runtime
+        .block_on(storage.save_paired_device(&StoredPairedDevice {
+            device_id: guid.clone(),
+            host: "127.0.0.1".into(),
+            certificate_fingerprint: "fixture-only".into(),
+        }))
+        .expect("pairing");
+    drop(runtime);
+    let mdns = mdns_sd::ServiceDaemon::new().expect("advertiser");
+    mdns.register(
+        mdns_sd::ServiceInfo::new(
+            droidmux::discovery::ADB_TLS_CONNECT_SERVICE,
+            &guid,
+            &format!("{guid}.local."),
+            "",
+            port,
+            [("name", "自动重连夹具")].as_slice(),
+        )
+        .expect("service")
+        .enable_addr_auto(),
+    )
+    .expect("register");
+    let backend = Backend::new(storage.clone()).expect("backend");
+    wait_for_timeout(&backend, Duration::from_secs(15), |_| {
+        std::fs::read_to_string(storage.directory.join("quickadb.log"))
+            .unwrap_or_default()
+            .contains("自动连接")
+    });
+    assert!(
+        backend.snapshot().notice.is_empty(),
+        "background retry must not show global error"
+    );
+    let first = DeviceServer::start_on_port(
+        DeviceOptions {
+            tls: true,
+            features: "shell_v2,cmd,abb_exec",
+            idle_timeout: Duration::from_secs(2),
+            ..Default::default()
+        },
+        port,
+    );
+    wait_for_timeout(&backend, Duration::from_secs(12), |s| {
+        s.devices[0].status == DeviceStatus::Online
+    });
+    wait_for_timeout(&backend, Duration::from_secs(8), |s| {
+        s.devices[0].status == DeviceStatus::Offline
+    });
+    drop(first);
+    let second = DeviceServer::start_on_port(
+        DeviceOptions {
+            tls: true,
+            features: "shell_v2,cmd,abb_exec",
+            idle_timeout: Duration::from_secs(35),
+            ..Default::default()
+        },
+        port,
+    );
+    wait_for_timeout(&backend, Duration::from_secs(12), |s| {
+        s.devices[0].status == DeviceStatus::Online
+    });
+    assert!(backend.snapshot().notice.is_empty());
+    assert_eq!(backend.snapshot().devices.len(), 1);
+    assert!(!second.records.lock().expect("records").services.is_empty());
+    drop(backend);
+    mdns.shutdown().expect("shutdown advertiser");
+}
+
+#[test]
 fn paired_devices_use_discovered_ports_and_keep_one_identity() {
     let directory = TempDirectory::new();
     let options = DeviceOptions {

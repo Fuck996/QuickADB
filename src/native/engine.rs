@@ -23,7 +23,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     runtime::Runtime,
@@ -64,11 +64,20 @@ enum WirelessTarget {
 enum DeviceChange {
     Connection(Option<Endpoint>),
     Forget,
+    Disconnect,
 }
 
 #[derive(Debug, thiserror::Error)]
 #[error("当前连接已被设备管理操作取消")]
 struct DeviceChangeCanceled;
+
+struct AutoReconnect {
+    endpoint: Endpoint,
+    revision: u64,
+    failures: u32,
+    next_attempt: Instant,
+    running: bool,
+}
 
 struct Engine {
     state: Mutex<Snapshot>,
@@ -77,6 +86,7 @@ struct Engine {
     clients: AsyncMutex<BTreeMap<String, Arc<AdbClient>>>,
     usb: Mutex<BTreeMap<String, UsbDeviceInfo>>,
     connecting: Mutex<BTreeMap<String, CancellationToken>>,
+    auto_reconnect: Mutex<BTreeMap<String, AutoReconnect>>,
     connection_locks: AsyncMutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     lanes: AsyncMutex<BTreeMap<String, mpsc::UnboundedSender<QueueItem>>>,
     cancellations: Mutex<BTreeMap<u64, CancellationToken>>,
@@ -102,6 +112,7 @@ impl Backend {
             clients: AsyncMutex::new(BTreeMap::new()),
             usb: Mutex::new(BTreeMap::new()),
             connecting: Mutex::new(BTreeMap::new()),
+            auto_reconnect: Mutex::new(BTreeMap::new()),
             connection_locks: AsyncMutex::new(BTreeMap::new()),
             lanes: AsyncMutex::new(BTreeMap::new()),
             cancellations: Mutex::new(BTreeMap::new()),
@@ -219,6 +230,7 @@ impl Backend {
             match result {
                 Ok(()) => match change {
                     DeviceChange::Forget => engine.notice("已删除本机设备记录"),
+                    DeviceChange::Disconnect => {}
                     DeviceChange::Connection(endpoint) => {
                         engine.notice("连接配置已保存，正在连接设备");
                         match endpoint {
@@ -321,29 +333,7 @@ impl Backend {
     }
 
     pub fn disconnect(&self, id: String) {
-        let engine = self.engine.clone();
-        self.spawn(async move {
-            let active = engine
-                .state
-                .lock()
-                .expect("state lock poisoned")
-                .jobs
-                .iter()
-                .any(|j| j.device_id == id && j.stage.active());
-            if active {
-                engine.notice("设备仍有安装任务，请先等待任务结束或取消传输");
-                return;
-            }
-            if let Some(client) = engine.clients.lock().await.remove(&id)
-                && let Err(error) = client.close().await
-            {
-                engine.notice(&format!("断开设备时发生错误：{error}"));
-            }
-            engine.update_device(&id, |d| {
-                d.status = DeviceStatus::Disconnected;
-                d.selected = false;
-            });
-        });
+        self.change_device(id, DeviceChange::Disconnect);
     }
 
     pub fn enable_tcp(&self, id: String, host: String, port: u16) {
@@ -613,7 +603,9 @@ impl Engine {
             .find(|d| d.id == id)
             .context("设备记录已不存在")?;
         ensure!(
-            device.endpoint.is_some() || id.starts_with("tls:"),
+            matches!(change, DeviceChange::Disconnect)
+                || device.endpoint.is_some()
+                || id.starts_with("tls:"),
             "USB 设备不保存无线连接配置"
         );
         ensure!(
@@ -686,6 +678,13 @@ impl Engine {
             self.clients.lock().await.remove(id);
         }
         match change {
+            DeviceChange::Disconnect => {
+                self.update_device(id, |d| {
+                    d.status = DeviceStatus::Disconnected;
+                    d.selected = false;
+                    d.detail.clear();
+                });
+            }
             DeviceChange::Forget => {
                 self.storage.forget_wireless(id)?;
                 self.state
@@ -1077,7 +1076,7 @@ impl Engine {
             Ok(client) => {
                 let info = tokio::select! {
                     _ = cancel.cancelled() => Err(anyhow::anyhow!("连接已取消")),
-                    result = shell_text(&client, "getprop ro.product.model && getprop ro.serialno && getprop ro.build.version.release") => result,
+                    result = shell_text(&client, "getprop ro.product.model && getprop ro.serialno && getprop ro.build.version.release") => result.context("读取设备信息失败"),
                 };
                 let info = info.and_then(|output| {
                     let mut info = parse_device_info(&output)?;
@@ -1153,6 +1152,9 @@ impl Engine {
                         }
                         let client = Arc::new(client);
                         self.clients.lock().await.insert(id.clone(), client.clone());
+                        if let Err(error) = self.storage.log(&format!("设备 {id} 已连接")) {
+                            self.notice(&format!("连接日志保存失败：{error:#}"));
+                        }
                         tokio::spawn(self.clone().watch_connection(id.clone(), client.clone()));
                         Ok(client)
                     }
@@ -1264,6 +1266,131 @@ impl Engine {
         }
     }
 
+    fn reconnect_discovered(self: &Arc<Self>) {
+        let paired: BTreeSet<_> = self
+            .storage
+            .paired_devices()
+            .into_iter()
+            .map(|p| p.device_id)
+            .collect();
+        let candidates: Vec<_> = {
+            let state = self.state.lock().expect("state lock poisoned");
+            state
+                .discovered
+                .iter()
+                .filter_map(|discovered| {
+                    let guid = discovered.paired_id()?;
+                    if !paired.contains(guid) {
+                        return None;
+                    }
+                    let id = format!("tls:{guid}");
+                    let device = state.devices.iter().find(|d| d.id == id);
+                    if device.is_some_and(|d| d.status == DeviceStatus::Online) {
+                        return None;
+                    }
+                    let eligible = !state.managing.contains(&id)
+                        && device.is_none_or(|d| d.status == DeviceStatus::Offline);
+                    let revision = state.device_revisions.get(&id).copied().unwrap_or_default();
+                    Some((
+                        id,
+                        Endpoint {
+                            paired_id: Some(guid.to_owned()),
+                            ..discovered.endpoint.clone()
+                        },
+                        revision,
+                        eligible,
+                    ))
+                })
+                .collect()
+        };
+        let mut retries = self.auto_reconnect.lock().expect("reconnect lock poisoned");
+        retries.retain(|id, _| {
+            candidates
+                .iter()
+                .any(|(candidate, _, _, _)| candidate == id)
+        });
+        for (id, endpoint, revision, eligible) in candidates {
+            if !eligible {
+                continue;
+            }
+            let retry = retries.entry(id.clone()).or_insert_with(|| AutoReconnect {
+                endpoint: endpoint.clone(),
+                revision,
+                failures: 0,
+                next_attempt: Instant::now(),
+                running: false,
+            });
+            if retry.endpoint != endpoint || retry.revision != revision {
+                *retry = AutoReconnect {
+                    endpoint: endpoint.clone(),
+                    revision,
+                    failures: 0,
+                    next_attempt: Instant::now(),
+                    running: false,
+                };
+            }
+            if retry.running || Instant::now() < retry.next_attempt {
+                continue;
+            }
+            retry.running = true;
+            let engine = self.clone();
+            tokio::spawn(async move {
+                let result = engine
+                    .clone()
+                    .connect_wireless(
+                        WirelessTarget::Address(endpoint.clone()),
+                        &engine.stop,
+                        revision,
+                    )
+                    .await;
+                let log = {
+                    let mut retries = engine
+                        .auto_reconnect
+                        .lock()
+                        .expect("reconnect lock poisoned");
+                    let Some(retry) = retries
+                        .get_mut(&id)
+                        .filter(|r| r.endpoint == endpoint && r.revision == revision)
+                    else {
+                        return;
+                    };
+                    retry.running = false;
+                    match result {
+                        Ok(_) => {
+                            retry.failures = 0;
+                            retry.next_attempt = Instant::now();
+                            None
+                        }
+                        Err(error)
+                            if error.downcast_ref::<DeviceChangeCanceled>().is_some()
+                                || engine.stop.is_cancelled() =>
+                        {
+                            None
+                        }
+                        Err(error) => {
+                            retry.failures = retry.failures.saturating_add(1);
+                            let delay =
+                                Duration::from_secs((1_u64 << retry.failures.min(5)).min(30));
+                            retry.next_attempt = Instant::now() + delay;
+                            Some(format!(
+                                "设备 {id} 自动连接 {}:{} 第 {} 次失败，{} 秒后重试：{error:#}",
+                                endpoint.host,
+                                endpoint.port,
+                                retry.failures,
+                                delay.as_secs()
+                            ))
+                        }
+                    }
+                };
+                if let Some(log) = log
+                    && let Err(error) = engine.storage.log(&log)
+                {
+                    engine.notice(&format!("自动连接日志保存失败：{error:#}"));
+                }
+            });
+        }
+    }
+
     async fn monitor(self: Arc<Self>) {
         let mut previous_usb = BTreeSet::new();
         let discovery = match droidmux::discovery::MdnsDiscovery::new()
@@ -1342,51 +1469,22 @@ impl Engine {
                             service_type: device.service_type,
                             endpoint,
                         };
-                        let paired_id = discovered.paired_id().map(str::to_owned);
-                        let connect = {
+                        {
                             let mut state = self.state.lock().expect("state lock poisoned");
-                            let changed = if let Some(existing) = state
+                            if let Some(existing) = state
                                 .discovered
                                 .iter_mut()
                                 .find(|entry| entry.fullname == discovered.fullname)
                             {
-                                let changed = existing.endpoint != discovered.endpoint;
                                 *existing = discovered.clone();
-                                changed
                             } else {
                                 state.discovered.push(discovered.clone());
-                                true
-                            };
-                            changed
-                                && paired_id.as_ref().is_some_and(|id| {
-                                    !state.devices.iter().any(|d| {
-                                        d.id == format!("tls:{id}")
-                                            && matches!(
-                                                d.status,
-                                                DeviceStatus::Online
-                                                    | DeviceStatus::Connecting
-                                                    | DeviceStatus::Unauthorized
-                                                    | DeviceStatus::Disconnected
-                                            )
-                                    })
-                                })
-                        };
-                        if connect
-                            && let Some(id) = paired_id
-                            && self
-                                .storage
-                                .paired_devices()
-                                .iter()
-                                .any(|d| d.device_id == id)
-                        {
-                            tokio::spawn(self.clone().connect_endpoint(Endpoint {
-                                paired_id: Some(id),
-                                ..discovered.endpoint
-                            }));
+                            }
                         }
                     }
                 }
             }
+            self.reconnect_discovered();
             tokio::select! { _ = self.stop.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(2)) => {} }
         }
     }
@@ -1508,6 +1606,7 @@ impl Engine {
 
     async fn run_lane(self: Arc<Self>, mut receiver: mpsc::UnboundedReceiver<QueueItem>) {
         while let Some(item) = receiver.recv().await {
+            let started = Instant::now();
             if item.cancel.is_cancelled() {
                 self.update_job(item.job.id, |j| j.stage = JobStage::Canceled);
             } else {
@@ -1564,11 +1663,14 @@ impl Engine {
                     .find(|j| j.id == item.job.id)
                     .map(|j| {
                         format!(
-                            "安装 {} → {}：{} {}",
+                            "安装 {} → {}：{} {}；已确认 {}/{} 字节，任务耗时 {:.2} 秒",
                             j.title,
                             j.device_name,
                             j.stage.label(),
-                            j.detail
+                            j.detail,
+                            j.transferred,
+                            j.total,
+                            started.elapsed().as_secs_f64(),
                         )
                     });
                 if let Some(detail) = detail
