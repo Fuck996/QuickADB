@@ -1,5 +1,15 @@
 # 原生 ADB SDK
 
+## 窗口渲染依赖
+
+`eframe/` 来自已锁定的 eframe 0.36.2 发布源码，上游提交 `49682f8baa058bf49e011035cfbd6e825f88a5ef`，保留 MIT / Apache-2.0 双许可。仅回移官方 [PR #8461](https://github.com/emilk/egui/pull/8461) 最终合并补丁（`983155456c964fcc92c951ed6b1c721cc24a205c`），没有升级其余 egui 组件或替换 Glow 后端。
+
+原 Windows 路径每帧在清屏前、绘制前都解绑并重新绑定同一 GL 上下文。[WGL 文档](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/nf-wingdi-wglmakecurrent)说明切换会刷新之前上下文的命令，因而清屏与内容绘制之间也多了一次切换。最终上游补丁记录实际绑定的 viewport，同时验证上下文仍为 current；目标未变时保留绑定，真正切换窗口时仍正常切换。窗口销毁、重建、挂起时清除记录，避免仅按 context 判断而画到错误的 surface（上游 #4289）。
+
+这是对已确认的渲染生命周期问题的修正；上游问题本身证明的是重复切换及其开销，不等于已证明用户现场黑闪的唯一原因。该限制和现场验收状态见 `docs/verification.md`。
+
+## ADB 协议依赖
+
 来源：https://github.com/poapoauu/DroidMux
 
 固定提交：24b17e5fe83bc68f509215ab2cfeaa661005e852

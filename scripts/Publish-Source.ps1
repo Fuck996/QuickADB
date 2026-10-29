@@ -77,7 +77,7 @@ try {
     [IO.Compression.ZipFile]::CreateFromDirectory($sourceRoot, $archive, [IO.Compression.CompressionLevel]::Optimal, $true)
     $legalRoot = Join-Path $stage "QuickADB-$version-legal"
     New-Item -ItemType Directory -Path $legalRoot | Out-Null
-    $legalFiles = @('LICENSE', 'NOTICE', 'THIRD_PARTY.md', 'Cargo.lock', 'SOURCE_INFO.json', 'docs/licensing.md', 'assets/ThirdPartyNotices.txt', 'vendor/README.md', 'vendor/droidmux/LICENSE-MIT', 'vendor/droidmux/LICENSE-APACHE')
+    $legalFiles = @('LICENSE', 'NOTICE', 'THIRD_PARTY.md', 'Cargo.lock', 'SOURCE_INFO.json', 'docs/licensing.md', 'assets/ThirdPartyNotices.txt', 'vendor/README.md', 'vendor/droidmux/LICENSE-MIT', 'vendor/droidmux/LICENSE-APACHE', 'vendor/eframe/LICENSE-MIT', 'vendor/eframe/LICENSE-APACHE')
     $legalFiles += Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'assets/licenses') -Recurse -File | ForEach-Object { [IO.Path]::GetRelativePath($sourceRoot, $_.FullName) }
     foreach ($relative in $legalFiles) {
         $target = Join-Path $legalRoot $relative

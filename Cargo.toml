@@ -1,6 +1,6 @@
 [package]
 name = "quickadb"
-version = "0.9.8"
+version = "0.9.9"
 edition = "2024"
 rust-version = "1.95"
 description = "常驻托盘的 Android APK 安装抽屉"
@@ -28,7 +28,7 @@ secrecy = "0.10"
 bytes = "1"
 tokio-util = { version = "0.7", features = ["rt"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Memory", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_UI_Controls", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Graphics_Gdi"] }
-eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts", "accesskit"] }
+eframe = { version = "0.36.2", path = "vendor/eframe", default-features = false, features = ["glow", "default_fonts", "accesskit"] }
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 tray-icon = "0.21"
 rfd = "0.15"

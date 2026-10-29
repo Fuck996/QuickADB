@@ -13859,8 +13859,6 @@ DEALINGS IN THE SOFTWARE.
 === eframe 0.36.2 ===
 License: MIT OR Apache-2.0
 Source: https://github.com/emilk/egui/tree/main/crates/eframe
-License source: https://raw.githubusercontent.com/emilk/egui/49682f8baa058bf49e011035cfbd6e825f88a5ef/LICENSE-APACHE
-License source: https://raw.githubusercontent.com/emilk/egui/49682f8baa058bf49e011035cfbd6e825f88a5ef/LICENSE-MIT
 --- LICENSE-APACHE ---
                               Apache License
                         Version 2.0, January 2004

@@ -6,7 +6,7 @@ QuickADB 的原创部分采用根目录 [LICENSE](LICENSE) 与 [NOTICE](NOTICE) 
 | --- | --- | --- |
 | DroidMux | [poapoauu/DroidMux](https://github.com/poapoauu/DroidMux)，固定提交 `24b17e5fe83bc68f509215ab2cfeaa661005e852` | MIT OR Apache-2.0；ADB、USB、无线配对、发现和 shell。原始许可随 `vendor/droidmux` 保留，本地修改见 [vendor/README.md](vendor/README.md)。 |
 | libusb 1.0.27 / libusb1-sys 0.7.0 / rusb 0.9.4 | [libusb](https://github.com/libusb/libusb)、[libusb1-sys](https://github.com/a1ien/libusb1-sys)、[rusb](https://github.com/a1ien/rusb) | libusb 为 LGPL-2.1-or-later，Rust 封装为 MIT。静态链接，发布源码包包括库源码与重新构建所需材料。 |
-| egui / eframe 0.36.2 | [emilk/egui](https://github.com/emilk/egui) | MIT OR Apache-2.0；原生界面。 |
+| egui / eframe 0.36.2 | [emilk/egui](https://github.com/emilk/egui) | MIT OR Apache-2.0；原生界面。`vendor/eframe` 回移官方窗口上下文生命周期修复，来源与改动见 [vendor/README.md](vendor/README.md)。 |
 | AccessKit | [AccessKit/accesskit](https://github.com/AccessKit/accesskit) | MIT OR Apache-2.0；部分适配器为 Apache-2.0；无障碍支持。 |
 | winit / tray-icon / rfd | [winit](https://github.com/rust-windowing/winit)、[tray-icon](https://github.com/tauri-apps/tray-icon)、[rfd](https://github.com/PolyMeilex/rfd) | 保留各版本的 MIT / Apache-2.0 等许可；窗口、托盘及文件选择器。 |
 | 默认字体 | [epaint_default_fonts](https://github.com/emilk/egui/tree/main/crates/epaint_default_fonts) | 除代码许可外还包含 OFL-1.1、Ubuntu-font-1.0；字体许可全文在第三方声明与源码包中。 |
