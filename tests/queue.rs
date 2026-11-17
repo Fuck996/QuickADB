@@ -266,13 +266,24 @@ fn paired_devices_use_discovered_ports_and_keep_one_identity() {
     );
     backend.set_alias(&snapshot.devices[0], "常用测试机");
     let data = storage.directory.clone();
+    let status = mdns
+        .unregister(&format!(
+            "{guid}.{}",
+            droidmux::discovery::ADB_TLS_CONNECT_SERVICE
+        ))
+        .expect("withdraw")
+        .recv_timeout(Duration::from_secs(5))
+        .expect("withdraw acknowledged");
+    assert!(matches!(status, mdns_sd::UnregisterStatus::OK));
+    // The daemon repeats its goodbye packet. Wait until the browser drops the
+    // old endpoint before advertising the same service on a new port.
+    wait_for_timeout(&backend, Duration::from_secs(10), |s| {
+        !s.discovered
+            .iter()
+            .any(|d| d.paired_id() == Some(guid.as_str()))
+    });
     drop(backend);
     drop(storage);
-    mdns.unregister(&format!(
-        "{guid}.{}",
-        droidmux::discovery::ADB_TLS_CONNECT_SERVICE
-    ))
-    .expect("withdraw");
     let restored =
         Backend::new(Storage::open(data).expect("reopen data")).expect("restarted backend");
     let snapshot = restored.snapshot();
