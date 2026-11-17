@@ -170,7 +170,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDeleg
     private func makeStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
-            button.image = StatusIcon.adbRobot()
+            button.image = StatusIcon.quickADBMark()
             button.toolTip = "QuickADB 安装抽屉"
             button.setAccessibilityLabel("QuickADB 安装抽屉")
             button.target = self
