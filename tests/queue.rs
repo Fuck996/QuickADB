@@ -808,6 +808,50 @@ fn persisted_key_is_protected_and_corrupt_settings_are_reported() {
     assert!(Storage::open(directory).is_err());
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_backend_reuses_the_keychain_identity_after_storage_opens() {
+    let fixture = TempDirectory::new();
+    let data = fixture.0.join("data");
+    let storage = Storage::open(data.clone()).expect("create fixture key");
+    let credential = storage
+        .credential()
+        .expect("original credential")
+        .public_key();
+    let record = StoredPairedDevice {
+        device_id: "adb-fixture".into(),
+        host: "192.0.2.1".into(),
+        certificate_fingerprint: "fixture-only".into(),
+    };
+    let runtime = tokio::runtime::Runtime::new().expect("fixture runtime");
+    runtime
+        .block_on(storage.save_paired_device(&record))
+        .expect("persist pairing");
+    drop(storage);
+
+    let reopened = Storage::open(data.clone()).expect("read the existing keychain item");
+    quickadb::platform::remove_fixture_credential(&data).expect("remove only the fixture item");
+    let backend = Backend::new(reopened.clone()).expect("start without another keychain read");
+    assert!(
+        backend
+            .snapshot()
+            .devices
+            .iter()
+            .any(|device| device.id == "tls:adb-fixture")
+    );
+    let cached = runtime
+        .block_on(reopened.load_host_credential())
+        .expect("read cached pairing credential")
+        .expect("pairing credential");
+    let restored = droidmux::auth::RsaAdbCredential::from_pkcs8_pem(
+        cached.expose_private_key_pem(),
+        cached.client_name(),
+    )
+    .expect("parse cached identity");
+    assert_eq!(restored.public_key(), credential);
+    assert_eq!(reopened.paired_devices(), vec![record]);
+}
+
 #[test]
 fn offline_install_waits_for_its_guid_and_recovers_after_cancel_and_timeout() {
     let directory = TempDirectory::new();

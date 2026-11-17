@@ -31,10 +31,18 @@ struct HostKey {
     comment: String,
 }
 
+impl HostKey {
+    fn into_credential(self) -> StoredHostCredential {
+        StoredHostCredential::new(SecretString::from(self.pem), self.comment)
+    }
+}
+
 pub struct Storage {
     pub directory: PathBuf,
     settings: Mutex<Settings>,
     paired: Mutex<BTreeMap<String, PairedRecord>>,
+    #[cfg(target_os = "macos")]
+    host_credential: Mutex<StoredHostCredential>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -50,12 +58,7 @@ impl Storage {
         let settings = read_json::<Settings>(&directory.join("settings.json"))?.unwrap_or_default();
         let paired = read_json::<BTreeMap<String, PairedRecord>>(&directory.join("paired.json"))?
             .unwrap_or_default();
-        let result = Arc::new(Self {
-            directory,
-            settings: Mutex::new(settings),
-            paired: Mutex::new(paired),
-        });
-        let key = if let Some(key) = result.load_key()? {
+        let key = if let Some(key) = Self::load_key(&directory)? {
             key
         } else {
             let credential = RsaAdbCredential::generate("QuickADB")?;
@@ -63,11 +66,17 @@ impl Storage {
                 pem: credential.to_pkcs8_pem()?.to_string(),
                 comment: "QuickADB".into(),
             };
-            result.save_key(&key)?;
+            Self::save_key(&directory, &key)?;
             key
         };
         RsaAdbCredential::from_pkcs8_pem(&key.pem, &key.comment)?;
-        Ok(result)
+        Ok(Arc::new(Self {
+            directory,
+            settings: Mutex::new(settings),
+            paired: Mutex::new(paired),
+            #[cfg(target_os = "macos")]
+            host_credential: Mutex::new(key.into_credential()),
+        }))
     }
 
     pub fn settings(&self) -> Settings {
@@ -160,30 +169,44 @@ impl Storage {
     }
 
     pub fn credential(&self) -> Result<Arc<RsaAdbCredential>> {
-        let key = self.read_key()?;
+        let key = self.read_credential()?;
         Ok(Arc::new(RsaAdbCredential::from_pkcs8_pem(
-            &key.pem,
-            &key.comment,
+            key.expose_private_key_pem(),
+            key.client_name(),
         )?))
     }
 
-    fn read_key(&self) -> Result<HostKey> {
-        self.load_key()?.context("设备授权密钥已丢失")
+    fn read_credential(&self) -> Result<StoredHostCredential> {
+        #[cfg(target_os = "macos")]
+        {
+            // The system can prompt on each read when access was granted only once.
+            Ok(self
+                .host_credential
+                .lock()
+                .expect("host credential lock poisoned")
+                .clone())
+        }
+        #[cfg(target_os = "windows")]
+        {
+            Ok(Self::load_key(&self.directory)?
+                .context("设备授权密钥已丢失")?
+                .into_credential())
+        }
     }
 
-    fn load_key(&self) -> Result<Option<HostKey>> {
+    fn load_key(directory: &Path) -> Result<Option<HostKey>> {
         #[cfg(target_os = "windows")]
-        let bytes = self.load_windows_key()?;
+        let bytes = Self::load_windows_key(directory)?;
         #[cfg(target_os = "macos")]
-        let bytes = crate::keychain::load(&self.directory)?;
+        let bytes = crate::keychain::load(directory)?;
         bytes
             .map(|bytes| serde_json::from_slice(&bytes).context("设备授权密钥格式损坏"))
             .transpose()
     }
 
     #[cfg(target_os = "windows")]
-    fn load_windows_key(&self) -> Result<Option<Vec<u8>>> {
-        let encrypted = match fs::read(self.directory.join("host.key")) {
+    fn load_windows_key(directory: &Path) -> Result<Option<Vec<u8>>> {
+        let encrypted = match fs::read(directory.join("host.key")) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error).context("无法读取设备授权密钥"),
@@ -193,22 +216,15 @@ impl Storage {
         Ok(Some(decrypted))
     }
 
-    fn write_key(&self, pem: &str, comment: &str) -> Result<()> {
-        self.save_key(&HostKey {
-            pem: pem.into(),
-            comment: comment.into(),
-        })
-    }
-
-    fn save_key(&self, key: &HostKey) -> Result<()> {
+    fn save_key(directory: &Path, key: &HostKey) -> Result<()> {
         let bytes = serde_json::to_vec(key)?;
         #[cfg(target_os = "windows")]
         {
             let encrypted = protect(&bytes, true).context("无法保护设备授权密钥")?;
-            atomic_write(&self.directory.join("host.key"), &encrypted)
+            atomic_write(&directory.join("host.key"), &encrypted)
         }
         #[cfg(target_os = "macos")]
-        crate::keychain::save(&self.directory, &bytes)
+        crate::keychain::save(directory, &bytes)
     }
 
     pub fn log(&self, message: &str) -> Result<()> {
@@ -240,21 +256,27 @@ impl CredentialStore for Storage {
     async fn load_host_credential(
         &self,
     ) -> Result<Option<StoredHostCredential>, CredentialStoreError> {
-        let key = self.read_key().map_err(store_error)?;
-        Ok(Some(StoredHostCredential::new(
-            SecretString::from(key.pem),
-            key.comment,
-        )))
+        self.read_credential().map(Some).map_err(store_error)
     }
     async fn save_host_credential(
         &self,
         credential: &StoredHostCredential,
     ) -> Result<(), CredentialStoreError> {
-        self.write_key(
-            credential.expose_private_key_pem(),
-            credential.client_name(),
-        )
-        .map_err(store_error)
+        #[cfg(target_os = "macos")]
+        let mut cached = self
+            .host_credential
+            .lock()
+            .expect("host credential lock poisoned");
+        let key = HostKey {
+            pem: credential.expose_private_key_pem().into(),
+            comment: credential.client_name().into(),
+        };
+        Self::save_key(&self.directory, &key).map_err(store_error)?;
+        #[cfg(target_os = "macos")]
+        {
+            *cached = key.into_credential();
+        }
+        Ok(())
     }
     async fn save_paired_device(
         &self,
