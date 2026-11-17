@@ -186,6 +186,7 @@ final class BackendModel {
     private var lastPayload = Data()
     private(set) var snapshot = Snapshot()
     var actionError: String?
+    var restartingForUpdate = false
 
     init() throws {
         directory = try FileManager.default.url(
@@ -212,6 +213,10 @@ final class BackendModel {
 
     @discardableResult
     func send(_ command: Command) -> Bool {
+        guard !restartingForUpdate else {
+            actionError = "QuickADB 正在安装更新并重新打开。"
+            return false
+        }
         do {
             let data = try encoder.encode(command)
             let payload = String(decoding: data, as: UTF8.self)

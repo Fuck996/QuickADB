@@ -49,6 +49,7 @@ plutil -replace CFBundleShortVersionString -string "$version" "$contents/Info.pl
 plutil -replace CFBundleVersion -string "$version" "$contents/Info.plist"
 if [[ -n "${QUICKADB_MAC_BETA:-}" ]]; then
     plutil -replace CFBundleDisplayName -string "QuickADB 测试版" "$contents/Info.plist"
+    plutil -insert QuickADBMacBetaRevision -integer "$QUICKADB_MAC_BETA" "$contents/Info.plist"
 fi
 plutil -lint "$contents/Info.plist"
 cp NOTICE LICENSE assets/ThirdPartyNotices.txt "$resources/"

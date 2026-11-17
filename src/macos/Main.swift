@@ -36,6 +36,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDeleg
     private var drawer: NSPanel?
     private var preferences: NSWindow?
     private var refresh: Timer?
+    private var updateTimer: Timer?
+    private var updateTask: Task<Void, Never>?
+    private var pendingUpdate: MacUpdate.Staged?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let event = NSAppleEventManager.shared().currentAppleEvent
@@ -67,6 +70,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDeleg
         }
         RunLoop.main.add(timer, forMode: .common)
         refresh = timer
+        MacUpdate.finishPreviousUpdate(installed: Bundle.main.bundleURL.resolvingSymlinksInPath(),
+                                       arguments: CommandLine.arguments)
+        let updater = Timer(timeInterval: 24 * 60 * 60, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.startUpdateCheck(manual: false) }
+        }
+        RunLoop.main.add(updater, forMode: .common)
+        updateTimer = updater
+        startUpdateCheck(manual: false)
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -75,6 +86,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDeleg
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard model?.restartingForUpdate != true else { return .terminateCancel }
         model?.refresh()
         guard model?.snapshot.jobs.contains(where: \.active) == true else { return .terminateNow }
         let alert = NSAlert()
@@ -88,6 +100,9 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDeleg
 
     func applicationWillTerminate(_ notification: Notification) {
         refresh?.invalidate()
+        updateTimer?.invalidate()
+        updateTask?.cancel()
+        pendingUpdate?.discard()
     }
 
     @objc private func showWorkspace() {
@@ -240,6 +255,100 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDeleg
         routes.sheet = .connection
     }
 
+    @objc private func checkForUpdates() {
+        startUpdateCheck(manual: true)
+    }
+
+    private func startUpdateCheck(manual: Bool) {
+        if updateTask != nil {
+            if manual { showUpdateMessage("更新正在处理", "已确认的更新会等待当前安装和连接操作结束。") }
+            return
+        }
+        updateTask = Task {
+            defer { updateTask = nil }
+            var confirmed = false
+            do {
+                let current = try MacUpdate.currentVersion(.main)
+                guard current.beta > 0 else {
+                    if manual { showUpdateMessage("当前构建未启用在线更新", "请使用 GitHub 发布的 macOS 测试版。") }
+                    return
+                }
+                guard let release = try await MacUpdate.check(current: current) else {
+                    if manual { showUpdateMessage("已是最新 Mac 测试版", current.tag) }
+                    return
+                }
+                let alert = NSAlert()
+                alert.messageText = "发现 QuickADB \(release.version.tag)"
+                alert.informativeText = "从 GitHub 下载并校验后，QuickADB 会等待当前任务结束，并安装更新、重新打开。"
+                alert.addButton(withTitle: "下载并更新")
+                alert.addButton(withTitle: "稍后")
+                alert.addButton(withTitle: "发布说明")
+                NSApp.activate()
+                switch alert.runModal() {
+                case .alertFirstButtonReturn:
+                    confirmed = true
+                case .alertThirdButtonReturn:
+                    NSWorkspace.shared.open(release.page)
+                    return
+                default:
+                    return
+                }
+
+                let installed = Bundle.main.bundleURL.resolvingSymlinksInPath()
+                let staged = try await MacUpdate.prepare(release, installed: installed)
+                pendingUpdate = staged
+                guard let model else { staged.discard(); pendingUpdate = nil; return }
+                while updateIsBlocked(model) {
+                    try await Task.sleep(for: .seconds(1))
+                }
+                try Task.checkCancellation()
+                try await installMacUpdate(staged, model: model)
+            } catch is CancellationError {
+                pendingUpdate?.discard()
+                pendingUpdate = nil
+            } catch {
+                pendingUpdate?.discard()
+                pendingUpdate = nil
+                if manual || confirmed { showUpdateMessage("无法完成更新", error.localizedDescription) }
+            }
+        }
+    }
+
+    private func updateIsBlocked(_ model: BackendModel) -> Bool {
+        model.refresh()
+        let snapshot = model.snapshot
+        return snapshot.connecting || snapshot.pairing || snapshot.jobs.contains(where: \.active)
+            || snapshot.devices.contains(where: \.managing)
+    }
+
+    private func installMacUpdate(_ staged: MacUpdate.Staged, model: BackendModel) async throws {
+        model.restartingForUpdate = true
+        defer { model.restartingForUpdate = false }
+        try staged.swap()
+        pendingUpdate = nil
+        do {
+            _ = try await MacUpdate.relaunch(staged)
+        } catch {
+            do {
+                try staged.swap()
+                staged.discard()
+            } catch {
+                throw MacUpdate.Failure("新版无法重新打开。旧版仍保存在 \(staged.candidate.path)。")
+            }
+            throw MacUpdate.Failure("新版无法重新打开，已还原旧版。\(error.localizedDescription)")
+        }
+        model.restartingForUpdate = false
+        NSApp.terminate(nil)
+    }
+
+    private func showUpdateMessage(_ title: String, _ message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        NSApp.activate()
+        alert.runModal()
+    }
+
     private func makeMenus() {
         let main = NSMenu()
         let root = NSMenuItem()
@@ -247,6 +356,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDeleg
         root.submenu = app
         main.addItem(root)
         app.addItem(withTitle: "关于 QuickADB", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        app.addItem(withTitle: "检查更新…", action: #selector(checkForUpdates), keyEquivalent: "").target = self
         app.addItem(.separator())
         app.addItem(withTitle: "设置…", action: #selector(showSettings), keyEquivalent: ",").target = self
         app.addItem(.separator())

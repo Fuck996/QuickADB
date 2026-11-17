@@ -6,6 +6,8 @@
 
 菜单栏点击图标打开抽屉。图钉将抽屉固定为可拖动的浮动窗口。连接、设备和任务详情在主窗口的系统表单中打开。关闭窗口仍可使用菜单栏，退出使用 QuickADB 菜单或 ⌘Q。
 
+支持在线更新的 macOS 测试版会在启动时和常驻期间每天检查 GitHub Releases。也可以从「QuickADB → 检查更新…」手动检查。确认后，应用核对安装镜像的 SHA-256、版本和代码签名，等待当前任务结束，再更新原位置的应用并重新打开。需要先把应用拷贝到可写目录。带临时签名的新版本仍可能触发 macOS 的应用或钥匙串授权提示。早期测试版需要先通过 DMG 升级一次。
+
 ## 构建
 
 在 Apple 芯片 Mac 上准备带 macOS 27 SDK 的 Xcode 和 Rust 1.95 或更高版本。脚本以 Cargo.lock 构建 Rust 静态库，并将 ADB 和 libusb 链接到 `.app` 中的单个可执行文件。 [Xcode SDK 要求](https://developer.apple.com/xcode/system-requirements/)
