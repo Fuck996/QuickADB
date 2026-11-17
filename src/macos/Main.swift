@@ -15,7 +15,7 @@ enum QuickADBApp {
         let application = NSApplication.shared
         let delegate = AppDelegate()
         application.delegate = delegate
-        application.setActivationPolicy(.regular)
+        _ = DockIcon.apply(hidden: UserDefaults.standard.bool(forKey: DockIcon.hiddenKey), to: application)
         withExtendedLifetime(delegate) { application.run() }
     }
 }
@@ -31,6 +31,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDeleg
     private let routes = WorkspaceRoutes()
     private let drawerRoutes = WorkspaceRoutes()
     private var statusItem: NSStatusItem?
+    private let statusMenu = NSMenu()
     private let popover = NSPopover()
     private var workspace: NSWindow?
     private var drawer: NSPanel?
@@ -140,12 +141,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDeleg
         popover.performClose(nil)
         if preferences == nil {
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 460, height: 410),
+                contentRect: NSRect(origin: .zero, size: Preferences.windowSize),
                 styleMask: [.titled, .closable],
                 backing: .buffered, defer: false
             )
             window.title = "QuickADB 设置"
-            window.contentViewController = NSHostingController(rootView: Preferences(model: model))
+            window.contentViewController = NSHostingController(
+                rootView: Preferences(model: model, checkForUpdates: { [weak self] in self?.checkForUpdates() })
+            )
             window.isReleasedWhenClosed = false
             window.center()
             preferences = window
@@ -171,17 +174,34 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDeleg
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
             button.image = StatusIcon.quickADBMark()
-            button.toolTip = "QuickADB 安装抽屉"
+            button.toolTip = "QuickADB 安装抽屉。右键打开菜单。"
             button.setAccessibilityLabel("QuickADB 安装抽屉")
             button.target = self
-            button.action = #selector(toggleDrawer)
+            button.action = #selector(handleStatusClick(_:))
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            statusMenu.addItem(withTitle: "打开主窗口", action: #selector(showWorkspace), keyEquivalent: "").target = self
+            statusMenu.addItem(withTitle: "设置…", action: #selector(showSettings), keyEquivalent: "").target = self
+            statusMenu.addItem(withTitle: "检查更新…", action: #selector(checkForUpdates), keyEquivalent: "").target = self
+            statusMenu.addItem(.separator())
+            statusMenu.addItem(withTitle: "退出 QuickADB", action: #selector(NSApplication.terminate(_:)),
+                               keyEquivalent: "").target = NSApp
         }
         statusItem = item
         popover.behavior = .transient
         popover.contentSize = NSSize(width: 400, height: 640)
     }
 
-    @objc private func toggleDrawer() {
+    @objc private func handleStatusClick(_ button: NSStatusBarButton) {
+        if let event = NSApp.currentEvent,
+           event.type == .rightMouseUp || (event.type == .leftMouseUp && event.modifierFlags.contains(.control)) {
+            popover.performClose(nil)
+            NSMenu.popUpContextMenu(statusMenu, with: event, for: button)
+        } else {
+            toggleDrawer()
+        }
+    }
+
+    private func toggleDrawer() {
         guard let model, let button = statusItem?.button else { return }
         model.refresh()
         if model.snapshot.pinned {

@@ -19,14 +19,39 @@ enum Appearance: String, CaseIterable {
     }
 }
 
+enum DockIcon {
+    static let hiddenKey = "hideDockIcon"
+
+    @MainActor
+    static func apply(hidden: Bool, to application: NSApplication) -> Bool {
+        application.setActivationPolicy(hidden ? .accessory : .regular)
+    }
+}
+
 struct Preferences: View {
+    static let windowSize = NSSize(width: 460, height: 490)
+
     let model: BackendModel
+    let checkForUpdates: () -> Void
+    @AppStorage(DockIcon.hiddenKey) private var hideDockIcon = false
     @AppStorage("appearance") private var appearance = Appearance.system
     @ViewState private var loginStatus = SMAppService.mainApp.status
     @ViewState private var loginError: String?
+    @ViewState private var dockError: String?
+
+    private var version: String {
+        guard let current = try? MacUpdate.currentVersion(.main) else { return "未知" }
+        return current.beta > 0 ? String(current.tag.dropFirst()) : current.base
+    }
 
     var body: some View {
         Form {
+            Section("版本与更新") {
+                LabeledContent("当前版本") {
+                    Text(version).monospacedDigit().textSelection(.enabled)
+                }
+                Button("检查更新…", action: checkForUpdates)
+            }
             Section("外观") {
                 Picker("主题", selection: $appearance) {
                     ForEach(Appearance.allCases, id: \.self) { item in
@@ -36,6 +61,13 @@ struct Preferences: View {
                 .onChange(of: appearance) { appearance.apply() }
             }
             Section("常驻") {
+                Toggle("隐藏 Dock 图标", isOn: Binding(
+                    get: { hideDockIcon },
+                    set: setDockIconHidden
+                ))
+                if let dockError {
+                    Text(dockError).foregroundStyle(.red)
+                }
                 Toggle("登录时启动到菜单栏", isOn: Binding(
                     get: { loginStatus == .enabled || loginStatus == .requiresApproval },
                     set: setLaunchAtLogin
@@ -70,10 +102,22 @@ struct Preferences: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 460, height: 410)
+        .frame(width: Self.windowSize.width, height: Self.windowSize.height)
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             loginStatus = SMAppService.mainApp.status
         }
+    }
+
+    private func setDockIconHidden(_ hidden: Bool) {
+        let window = NSApp.keyWindow
+        guard DockIcon.apply(hidden: hidden, to: NSApp) else {
+            dockError = "无法更改 Dock 图标的显示状态。"
+            return
+        }
+        hideDockIcon = hidden
+        dockError = nil
+        NSApp.activate()
+        window?.makeKeyAndOrderFront(nil)
     }
 
     private func setLaunchAtLogin(_ enabled: Bool) {
