@@ -113,7 +113,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: github.ref_type == 'tag'
+    if: ${{ !cancelled() && needs.source.result == 'success' && github.ref_type == 'tag' }}
     needs: source
     runs-on: ubuntu-latest
     timeout-minutes: 30
