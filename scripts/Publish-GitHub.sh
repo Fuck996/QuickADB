@@ -8,25 +8,30 @@ commit="${GITHUB_SHA:?}"
 version=$(awk -F '"' '/^version = "/ { print $2; exit }' Cargo.toml)
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 win_tag="v$version"
-mac_tag="$win_tag-mac-beta.1"
-test "${GITHUB_REF_NAME:?}" = "$win_tag"
+ref="${GITHUB_REF_NAME:?}"
+if [[ "$ref" == "$win_tag" ]]; then
+    mac_tag="$win_tag-mac-beta.1"
+else
+    revision=${ref#"$win_tag-mac-beta."}
+    [[ "$revision" =~ ^[1-9][0-9]*$ ]]
+    mac_tag="$ref"
+fi
 test "$(gh api "repos/$repo/git/ref/heads/main" --jq .object.sha)" = "$commit"
-test "$(gh api "repos/$repo/commits/$win_tag" --jq .sha)" = "$commit"
+test "$(gh api "repos/$repo/commits/$ref" --jq .sha)" = "$commit"
 
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
 dir=artifacts/release
-win_files=("$dir/QuickADB-$version-x64.exe" "$dir/QuickADB-$version-source.zip" "$dir/QuickADB-$version-legal.zip")
-mac_stem="$dir/QuickADB-$version-mac-beta.1"
+mac_stem="$dir/QuickADB-${mac_tag#v}"
 mac_files=("$mac_stem-arm64.dmg" "$mac_stem-arm64.dmg.sha256" "$mac_stem-source.zip" "$mac_stem-legal.zip")
-for file in "${win_files[@]}" "${mac_files[@]}"; do
-    test -s "$file"
-done
 
-if ! gh api "repos/$repo/git/ref/tags/$mac_tag" > "$work/mac-tag.json"; then
-    gh api --method POST "repos/$repo/git/refs" -f "ref=refs/tags/$mac_tag" -f "sha=$commit" > "$work/mac-tag.json"
+if [[ "$ref" == "$win_tag" ]]; then
+    win_files=("$dir/QuickADB-$version-x64.exe" "$dir/QuickADB-$version-source.zip" "$dir/QuickADB-$version-legal.zip")
+    if ! gh api "repos/$repo/git/ref/tags/$mac_tag" > "$work/mac-tag.json"; then
+        gh api --method POST "repos/$repo/git/refs" -f "ref=refs/tags/$mac_tag" -f "sha=$commit" > "$work/mac-tag.json"
+    fi
+    test "$(jq -r .object.sha "$work/mac-tag.json")" = "$commit"
 fi
-test "$(jq -r .object.sha "$work/mac-tag.json")" = "$commit"
 
 verify_assets() {
     local id="$1" file size digest
@@ -46,6 +51,7 @@ verify_assets() {
 prepare_release() {
     local tag="$1" prerelease="$2" notes="$3" file id
     shift 3
+    for file in "$@"; do test -s "$file"; done
     cp "$notes" "$work/notes.md"
     {
         printf '\n### SHA-256\n\n'
@@ -67,8 +73,12 @@ prepare_release() {
     verify_assets "$id" "$@"
 }
 
-prepare_release "$win_tag" false "docs/releases/$version.md" "${win_files[@]}"
-prepare_release "$mac_tag" true "docs/releases/$version-mac-beta.1.md" "${mac_files[@]}"
+if [[ "$ref" == "$win_tag" ]]; then
+    prepare_release "$win_tag" false "docs/releases/$version.md" "${win_files[@]}"
+fi
+prepare_release "$mac_tag" true "docs/releases/${mac_tag#v}.md" "${mac_files[@]}"
 
 gh release edit "$mac_tag" --repo "$repo" --draft=false --latest=false
-gh release edit "$win_tag" --repo "$repo" --draft=false --latest
+if [[ "$ref" == "$win_tag" ]]; then
+    gh release edit "$win_tag" --repo "$repo" --draft=false --latest
+fi

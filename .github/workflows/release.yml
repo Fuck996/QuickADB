@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-mac-beta.[0-9]+'
   workflow_dispatch:
 
 permissions:
@@ -15,6 +16,7 @@ concurrency:
 
 jobs:
   windows:
+    if: ${{ github.ref_type != 'tag' || !contains(github.ref_name, '-mac-beta.') }}
     runs-on: windows-2025
     timeout-minutes: 45
     env:
@@ -48,6 +50,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          revision=1
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" == *-mac-beta.* ]]; then
+            version=$(awk -F '"' '/^version = "/ { print $2; exit }' Cargo.toml)
+            revision=${GITHUB_REF_NAME#"v$version-mac-beta."}
+            [[ "$revision" =~ ^[1-9][0-9]*$ ]]
+          fi
           rustup target add aarch64-apple-darwin
           directory=$(mktemp -d "$RUNNER_TEMP/quickadb-keychain.XXXXXXXX")
           keychain="$directory/tests.keychain-db"
@@ -60,7 +68,7 @@ jobs:
           cargo test --locked --target aarch64-apple-darwin
           xcrun swiftc -swift-version 5 src/macos/MacUpdate.swift tests/macos_update.swift -o "$RUNNER_TEMP/quickadb-update-tests"
           "$RUNNER_TEMP/quickadb-update-tests"
-          bash scripts/Package-Mac.sh 1
+          bash scripts/Package-Mac.sh "$revision"
       - uses: actions/upload-artifact@v4
         with:
           name: macos-installer
@@ -71,11 +79,17 @@ jobs:
 
   source:
     needs: [windows, macos]
+    if: >-
+      ${{ !cancelled() && needs.macos.result == 'success' &&
+      (needs.windows.result == 'success' ||
+       (needs.windows.result == 'skipped' && github.ref_type == 'tag' &&
+        contains(github.ref_name, '-mac-beta.'))) }}
     runs-on: windows-2025
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v4
+        if: needs.windows.result == 'success'
         with:
           name: windows-exe
           path: artifacts
@@ -86,7 +100,9 @@ jobs:
       - name: Package complete corresponding source and license text
         shell: pwsh
         run: |
-          ./scripts/Publish-Source.ps1 -Revision $env:GITHUB_SHA
+          if (Test-Path -Path artifacts/QuickADB-*-x64.exe -PathType Leaf) {
+            ./scripts/Publish-Source.ps1 -Revision $env:GITHUB_SHA
+          }
           $images = @(Get-ChildItem -LiteralPath artifacts/macos -Filter '*.dmg' -File)
           if ($images.Count -ne 1) { throw '必须有且仅有一个 macOS 安装镜像。' }
           ./scripts/Publish-Source.ps1 -Revision $env:GITHUB_SHA -MacDiskImage $images[0].FullName
@@ -110,7 +126,7 @@ jobs:
           pattern: '*'
           merge-multiple: true
           path: artifacts/release
-      - name: Verify and publish both versions
+      - name: Verify and publish release assets
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}

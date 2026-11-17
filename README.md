@@ -4,14 +4,14 @@
 
 当前版本：[0.9.10](https://github.com/Fuck996/QuickADB/releases/tag/v0.9.10)，适用于 Windows x64。
 
-macOS 测试版面向 Apple 芯片与 macOS 27。主窗口使用原生工具栏和设备侧栏，菜单栏提供可固定的安装抽屉。 [测试版说明](docs/releases/0.9.10-mac-beta.1.md) · [构建与验收](docs/macos.md)
+macOS 测试版面向 Apple 芯片与 macOS 27。主窗口使用原生工具栏和设备侧栏，菜单栏提供可固定的安装抽屉。 [测试版说明](docs/releases/0.9.10-mac-beta.3.md) · [构建与验收](docs/macos.md)
 
 许可：[GPL-3.0-only](LICENSE)，来源保留条款见 [NOTICE](NOTICE)。
 
 ## 下载
 
 - Windows x64： [EXE](https://github.com/Fuck996/QuickADB/releases/download/v0.9.10/QuickADB-0.9.10-x64.exe) · [完整对应源码](https://github.com/Fuck996/QuickADB/releases/download/v0.9.10/QuickADB-0.9.10-source.zip) · [法律声明](https://github.com/Fuck996/QuickADB/releases/download/v0.9.10/QuickADB-0.9.10-legal.zip) · [发布说明](docs/releases/0.9.10.md)
-- macOS 27 与 Apple 芯片： [测试版 DMG](https://github.com/Fuck996/QuickADB/releases/download/v0.9.10-mac-beta.1/QuickADB-0.9.10-mac-beta.1-arm64.dmg) · [完整对应源码](https://github.com/Fuck996/QuickADB/releases/download/v0.9.10-mac-beta.1/QuickADB-0.9.10-mac-beta.1-source.zip) · [法律声明](https://github.com/Fuck996/QuickADB/releases/download/v0.9.10-mac-beta.1/QuickADB-0.9.10-mac-beta.1-legal.zip) · [发布说明](docs/releases/0.9.10-mac-beta.1.md)
+- macOS 27 与 Apple 芯片： [测试版 DMG](https://github.com/Fuck996/QuickADB/releases/download/v0.9.10-mac-beta.3/QuickADB-0.9.10-mac-beta.3-arm64.dmg) · [完整对应源码](https://github.com/Fuck996/QuickADB/releases/download/v0.9.10-mac-beta.3/QuickADB-0.9.10-mac-beta.3-source.zip) · [法律声明](https://github.com/Fuck996/QuickADB/releases/download/v0.9.10-mac-beta.3/QuickADB-0.9.10-mac-beta.3-legal.zip) · [发布说明](docs/releases/0.9.10-mac-beta.3.md)
 
 各资产的校验值随 [GitHub Releases](https://github.com/Fuck996/QuickADB/releases) 发布。
 
