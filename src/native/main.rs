@@ -4,14 +4,17 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(target_os = "windows")]
 mod ui;
 
+#[cfg(target_os = "windows")]
 fn main() {
     if let Err(error) = run() {
         quickadb::platform::show_error(&format!("{error:#}"));
     }
 }
 
+#[cfg(target_os = "windows")]
 fn run() -> anyhow::Result<()> {
     let Some(_instance) = quickadb::platform::Instance::acquire()? else {
         return Ok(());
@@ -22,4 +25,10 @@ fn run() -> anyhow::Result<()> {
     }
     let backend = quickadb::engine::Backend::new(storage.clone())?;
     ui::run(storage, backend).map_err(|error| anyhow::anyhow!("窗口初始化失败：{error}"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn main() -> std::process::ExitCode {
+    eprintln!("macOS 请使用 scripts/Build-Mac.sh 构建并打开 QuickADB.app");
+    std::process::ExitCode::FAILURE
 }

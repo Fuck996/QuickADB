@@ -764,8 +764,13 @@ fn background_check_recovers_and_reports_a_new_failure_without_global_noise() {
 fn persisted_key_is_protected_and_corrupt_settings_are_reported() {
     let directory = TempDirectory::new();
     let storage = Storage::open(directory.0.join("data")).expect("storage");
-    let encoded = std::fs::read(storage.directory.join("host.key")).expect("protected key");
-    assert!(!String::from_utf8_lossy(&encoded).contains("PRIVATE KEY"));
+    #[cfg(target_os = "windows")]
+    {
+        let encoded = std::fs::read(storage.directory.join("host.key")).expect("protected key");
+        assert!(!String::from_utf8_lossy(&encoded).contains("PRIVATE KEY"));
+    }
+    #[cfg(target_os = "macos")]
+    assert!(!storage.directory.join("host.key").exists());
     let first = storage
         .credential()
         .expect("credential")

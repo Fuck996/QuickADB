@@ -7,17 +7,24 @@ $projectRoot = Split-Path $PSScriptRoot -Parent
 $env:CARGO_HOME = Join-Path $projectRoot '.tools\cargo'
 Push-Location $projectRoot
 try {
-    $metadataText = & cargo metadata --format-version 1 --locked --offline --filter-platform x86_64-pc-windows-msvc
-    if ($LASTEXITCODE -ne 0) { throw '无法读取锁定依赖的许可信息。' }
-    $metadata = $metadataText | ConvertFrom-Json
+    $packages = @{}
+    foreach ($target in @('x86_64-pc-windows-msvc', 'aarch64-apple-darwin')) {
+        $metadataText = & cargo metadata --format-version 1 --locked --offline --filter-platform $target
+        if ($LASTEXITCODE -ne 0) { throw "无法读取 $target 锁定依赖的许可信息。" }
+        $metadata = $metadataText | ConvertFrom-Json
+        $included = @{}
+        foreach ($node in $metadata.resolve.nodes) { $included[$node.id] = $true }
+        foreach ($package in $metadata.packages) {
+            if ($included.ContainsKey($package.id) -and $package.name -ne 'quickadb') {
+                $packages[$package.id] = $package
+            }
+        }
+    }
     $supplements = Get-Content -LiteralPath (Join-Path $projectRoot 'assets\licenses\registry-notices.json') -Raw | ConvertFrom-Json -AsHashtable
-    $included = @{}
-    foreach ($node in $metadata.resolve.nodes) { $included[$node.id] = $true }
     $text = [System.Text.StringBuilder]::new()
     [void]$text.AppendLine('QuickADB 开源组件许可')
-    [void]$text.AppendLine('以下内容随应用内嵌，可在设置中复制。组件保留各自的许可证。')
-    foreach ($package in ($metadata.packages | Sort-Object name, version)) {
-        if (!$included.ContainsKey($package.id) -or $package.name -eq 'quickadb') { continue }
+    [void]$text.AppendLine('以下内容随应用提供，可在设置中查看。组件保留各自的许可证。')
+    foreach ($package in ($packages.Values | Sort-Object name, version)) {
         $directory = Split-Path $package.manifest_path -Parent
         [void]$text.AppendLine("`n=== $($package.name) $($package.version) ===")
         [void]$text.AppendLine("License: $($package.license)")

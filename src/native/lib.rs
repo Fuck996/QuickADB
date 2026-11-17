@@ -5,6 +5,14 @@
 pub mod apk;
 pub mod engine;
 pub mod install;
+#[cfg(target_os = "macos")]
+mod keychain;
+#[cfg(any(target_os = "macos", test))]
+mod mac_bridge;
 pub mod model;
+#[cfg(target_os = "windows")]
+pub mod platform;
+#[cfg(target_os = "macos")]
+#[path = "platform_macos.rs"]
 pub mod platform;
 pub mod storage;

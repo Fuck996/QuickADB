@@ -1,0 +1,4 @@
+module QuickADBBridge {
+    header "QuickADB.h"
+    export *
+}

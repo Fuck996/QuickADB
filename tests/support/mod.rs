@@ -56,6 +56,14 @@ impl TempDirectory {
 }
 impl Drop for TempDirectory {
     fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        for entry in std::fs::read_dir(&self.0).expect("read fixture directory") {
+            let entry = entry.expect("fixture entry");
+            if entry.file_type().expect("fixture type").is_dir() {
+                quickadb::platform::remove_fixture_credential(&entry.path())
+                    .expect("remove fixture keychain item");
+            }
+        }
         std::fs::remove_dir_all(&self.0).expect("remove fixture directory");
     }
 }

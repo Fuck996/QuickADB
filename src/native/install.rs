@@ -5,8 +5,9 @@
 use crate::{apk::Apk, model::JobStage};
 use anyhow::{Context, Result, bail, ensure};
 use droidmux::client::{AdbClient, AdbStream};
+#[cfg(target_os = "windows")]
+use std::os::windows::fs::OpenOptionsExt;
 use std::{
-    os::windows::fs::OpenOptionsExt,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -203,10 +204,11 @@ impl<F: Fn(Progress) + Send + Sync> Operation<'_, F> {
         last_commits: bool,
         sync: bool,
     ) -> Result<()> {
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .share_mode(1)
-            .open(&apk.path)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(target_os = "windows")]
+        options.share_mode(1);
+        let file = options.open(&apk.path)?;
         let metadata = file.metadata()?;
         ensure!(
             metadata.len() == apk.size && metadata.modified()? == apk.modified,
@@ -229,6 +231,15 @@ impl<F: Fn(Progress) + Send + Sync> Operation<'_, F> {
             let count = file.read(&mut buffer).await?;
             if count == 0 {
                 break;
+            }
+            #[cfg(target_os = "macos")]
+            if sent + count as u64 >= apk.size {
+                // Check again before the last write, which can trigger Android's commit.
+                ensure!(
+                    sent + count as u64 == apk.size
+                        && file.metadata().await?.modified()? == apk.modified,
+                    "APK 在传输时发生变化，请重新添加"
+                );
             }
             if last_commits && sent + count as u64 == apk.size {
                 // 单包最后一块到达后 Android 可能立即提交，此后只能等待真实结果。

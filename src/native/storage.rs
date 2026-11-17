@@ -17,6 +17,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
+#[cfg(target_os = "windows")]
 use windows_sys::Win32::{
     Foundation::LocalFree,
     Security::Cryptography::{
@@ -54,12 +55,18 @@ impl Storage {
             settings: Mutex::new(settings),
             paired: Mutex::new(paired),
         });
-        if !result.directory.join("host.key").exists() {
+        let key = if let Some(key) = result.load_key()? {
+            key
+        } else {
             let credential = RsaAdbCredential::generate("QuickADB")?;
-            let pem = credential.to_pkcs8_pem()?;
-            result.write_key(&pem, "QuickADB")?;
-        }
-        result.credential()?;
+            let key = HostKey {
+                pem: credential.to_pkcs8_pem()?.to_string(),
+                comment: "QuickADB".into(),
+            };
+            result.save_key(&key)?;
+            key
+        };
+        RsaAdbCredential::from_pkcs8_pem(&key.pem, &key.comment)?;
         Ok(result)
     }
 
@@ -161,20 +168,47 @@ impl Storage {
     }
 
     fn read_key(&self) -> Result<HostKey> {
-        let encrypted =
-            fs::read(self.directory.join("host.key")).context("无法读取设备授权密钥")?;
+        self.load_key()?.context("设备授权密钥已丢失")
+    }
+
+    fn load_key(&self) -> Result<Option<HostKey>> {
+        #[cfg(target_os = "windows")]
+        let bytes = self.load_windows_key()?;
+        #[cfg(target_os = "macos")]
+        let bytes = crate::keychain::load(&self.directory)?;
+        bytes
+            .map(|bytes| serde_json::from_slice(&bytes).context("设备授权密钥格式损坏"))
+            .transpose()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn load_windows_key(&self) -> Result<Option<Vec<u8>>> {
+        let encrypted = match fs::read(self.directory.join("host.key")) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error).context("无法读取设备授权密钥"),
+        };
         let decrypted = protect(&encrypted, false)
             .context("无法解密设备授权密钥，请使用创建它的 Windows 账号")?;
-        serde_json::from_slice(&decrypted).context("设备授权密钥格式损坏")
+        Ok(Some(decrypted))
     }
 
     fn write_key(&self, pem: &str, comment: &str) -> Result<()> {
-        let bytes = serde_json::to_vec(&HostKey {
+        self.save_key(&HostKey {
             pem: pem.into(),
             comment: comment.into(),
-        })?;
-        let encrypted = protect(&bytes, true).context("无法保护设备授权密钥")?;
-        atomic_write(&self.directory.join("host.key"), &encrypted)
+        })
+    }
+
+    fn save_key(&self, key: &HostKey) -> Result<()> {
+        let bytes = serde_json::to_vec(key)?;
+        #[cfg(target_os = "windows")]
+        {
+            let encrypted = protect(&bytes, true).context("无法保护设备授权密钥")?;
+            atomic_write(&self.directory.join("host.key"), &encrypted)
+        }
+        #[cfg(target_os = "macos")]
+        crate::keychain::save(&self.directory, &bytes)
     }
 
     pub fn log(&self, message: &str) -> Result<()> {
@@ -283,6 +317,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::rename(&temporary, path).with_context(|| format!("无法保存 {}", path.display()))
 }
 
+#[cfg(target_os = "windows")]
 fn protect(bytes: &[u8], encrypt: bool) -> Result<Vec<u8>> {
     let input = CRYPT_INTEGER_BLOB {
         cbData: u32::try_from(bytes.len())?,

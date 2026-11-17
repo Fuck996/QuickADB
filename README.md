@@ -4,6 +4,8 @@
 
 当前版本：[0.9.9](https://github.com/Fuck996/QuickADB/releases/tag/v0.9.9)，适用于 Windows x64。
 
+macOS 移植源码面向 Apple 芯片与 macOS 27。主窗口使用原生工具栏和设备侧栏，菜单栏提供可固定的安装抽屉。构建与验收见 [macOS 构建说明](docs/macos.md)。
+
 许可：[GPL-3.0-only](LICENSE)，来源保留条款见 [NOTICE](NOTICE)。
 
 ## 下载

@@ -63,10 +63,16 @@ impl AdbTransport for TraceTransport {
 #[ignore = "requires QUICKADB_LIVE_ID and an awake, paired Android device"]
 async fn wireless_shell_and_transfer_diagnostic() -> Result<()> {
     let id = std::env::var("QUICKADB_LIVE_ID").context("set QUICKADB_LIVE_ID")?;
-    let data = std::path::PathBuf::from(std::env::var("LOCALAPPDATA")?).join("QuickADB");
+    let data = quickadb::platform::data_directory()?;
+    #[cfg(target_os = "windows")]
     ensure!(
         data.join("host.key").is_file(),
         "existing credential required"
+    );
+    #[cfg(target_os = "macos")]
+    ensure!(
+        data.join("paired.json").is_file(),
+        "existing pairing required"
     );
     let storage = Storage::open(data)?;
     ensure!(

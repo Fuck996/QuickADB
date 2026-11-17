@@ -52,7 +52,7 @@ fn pair(storage: &Storage, id: &str) {
 fn failed_connection_can_be_edited_and_forgotten_without_leaving_old_rows() {
     let directory = TempDirectory::new();
     let storage = Storage::open(directory.0.join("data")).expect("storage");
-    let key = std::fs::read(storage.directory.join("host.key")).expect("protected host key");
+    let key = storage.credential().expect("host key").public_key();
     let reserved = std::net::TcpListener::bind("127.0.0.1:0").expect("unused address");
     let old = address(reserved.local_addr().expect("address").port());
     let server = DeviceServer::start(DeviceOptions {
@@ -101,7 +101,7 @@ fn failed_connection_can_be_edited_and_forgotten_without_leaving_old_rows() {
     assert!(!storage.settings().device_info.contains_key(&updated.key()));
     assert!(!storage.settings().aliases.contains_key(&updated.key()));
     assert_eq!(
-        std::fs::read(storage.directory.join("host.key")).expect("key retained"),
+        storage.credential().expect("key retained").public_key(),
         key
     );
     drop(backend);
@@ -117,7 +117,7 @@ fn forgetting_a_paired_device_cancels_discovery_and_preserves_other_authorizatio
     let other = format!("adb-keep-{}", std::process::id());
     pair(&storage, &id);
     pair(&storage, &other);
-    let key = std::fs::read(storage.directory.join("host.key")).expect("host key");
+    let key = storage.credential().expect("host key").public_key();
     storage
         .update_settings(|s| {
             s.aliases.insert(format!("tls:{id}"), "待删除设备".into());
@@ -166,10 +166,7 @@ fn forgetting_a_paired_device_cancels_discovery_and_preserves_other_authorizatio
             .aliases
             .contains_key(&format!("tls:{other}"))
     );
-    assert_eq!(
-        std::fs::read(storage.directory.join("host.key")).expect("host key"),
-        key
-    );
+    assert_eq!(storage.credential().expect("host key").public_key(), key);
     mdns.shutdown().expect("shutdown advertiser");
     drop(backend);
     let reopened = Storage::open(storage.directory.clone()).expect("reopen");

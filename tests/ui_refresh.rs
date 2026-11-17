@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // 来源保留条款见项目根目录 NOTICE（GPL 第 7(b) 条）。
 
+#![cfg(target_os = "windows")]
+
 mod support;
 
 mod application {
