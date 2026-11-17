@@ -2,15 +2,18 @@
 
 常驻 Windows 托盘的 APK 安装抽屉。使用原生 Rust 应用与静态 ADB 协议库，运行时不释放 adb.exe 或应用 DLL，不要求安装 .NET，也不依赖外部 ADB server。
 
-当前版本：[0.9.9](https://github.com/Fuck996/QuickADB/releases/tag/v0.9.9)，适用于 Windows x64。
+当前版本：[0.9.10](https://github.com/Fuck996/QuickADB/releases/tag/v0.9.10)，适用于 Windows x64。
 
-macOS 测试版面向 Apple 芯片与 macOS 27。主窗口使用原生工具栏和设备侧栏，菜单栏提供可固定的安装抽屉。 [测试版说明](docs/releases/0.9.9-mac-beta.1.md) · [构建与验收](docs/macos.md)
+macOS 测试版面向 Apple 芯片与 macOS 27。主窗口使用原生工具栏和设备侧栏，菜单栏提供可固定的安装抽屉。 [测试版说明](docs/releases/0.9.10-mac-beta.1.md) · [构建与验收](docs/macos.md)
 
 许可：[GPL-3.0-only](LICENSE)，来源保留条款见 [NOTICE](NOTICE)。
 
 ## 下载
 
-[下载 QuickADB-0.9.9-x64.exe](https://github.com/Fuck996/QuickADB/releases/download/v0.9.9/QuickADB-0.9.9-x64.exe)，直接运行，无需安装。其他版本及校验值见 [GitHub Releases](https://github.com/Fuck996/QuickADB/releases)，本版更新说明见 [0.9.9 发布说明](docs/releases/0.9.9.md)。
+- Windows x64： [EXE](https://github.com/Fuck996/QuickADB/releases/download/v0.9.10/QuickADB-0.9.10-x64.exe) · [完整对应源码](https://github.com/Fuck996/QuickADB/releases/download/v0.9.10/QuickADB-0.9.10-source.zip) · [法律声明](https://github.com/Fuck996/QuickADB/releases/download/v0.9.10/QuickADB-0.9.10-legal.zip) · [发布说明](docs/releases/0.9.10.md)
+- macOS 27 与 Apple 芯片： [测试版 DMG](https://github.com/Fuck996/QuickADB/releases/download/v0.9.10-mac-beta.1/QuickADB-0.9.10-mac-beta.1-arm64.dmg) · [完整对应源码](https://github.com/Fuck996/QuickADB/releases/download/v0.9.10-mac-beta.1/QuickADB-0.9.10-mac-beta.1-source.zip) · [法律声明](https://github.com/Fuck996/QuickADB/releases/download/v0.9.10-mac-beta.1/QuickADB-0.9.10-mac-beta.1-legal.zip) · [发布说明](docs/releases/0.9.10-mac-beta.1.md)
+
+各资产的校验值随 [GitHub Releases](https://github.com/Fuck996/QuickADB/releases) 发布。
 
 ## 功能
 

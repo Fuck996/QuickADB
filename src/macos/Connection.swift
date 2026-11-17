@@ -12,13 +12,13 @@ struct ConnectionSheet: View {
 
     let model: BackendModel
     @Environment(\.dismiss) private var dismiss
-    @State private var mode = Mode.pair
-    @State private var host = ""
-    @State private var port = ""
-    @State private var code = ""
-    @State private var pairingId: String?
-    @State private var pairedId = ""
-    @State private var manual = false
+    @ViewState private var mode = Mode.pair
+    @ViewState private var host = ""
+    @ViewState private var port = ""
+    @ViewState private var code = ""
+    @ViewState private var pairingId: String?
+    @ViewState private var pairedId = ""
+    @ViewState private var manual = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -226,12 +226,12 @@ struct DeviceSheet: View {
     let model: BackendModel
     let id: String
     @Environment(\.dismiss) private var dismiss
-    @State private var name = ""
-    @State private var host = ""
-    @State private var port = ""
-    @State private var expanded = false
-    @State private var automatic = true
-    @State private var forget = false
+    @ViewState private var name = ""
+    @ViewState private var host = ""
+    @ViewState private var port = ""
+    @ViewState private var expanded = false
+    @ViewState private var automatic = true
+    @ViewState private var forget = false
 
     private var device: Device? { model.snapshot.devices.first { $0.id == id } }
 

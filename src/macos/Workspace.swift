@@ -370,7 +370,7 @@ struct Workspace: View {
 private struct DropZone: View {
     let model: BackendModel
     let compact: Bool
-    @State private var targeting = false
+    @ViewState private var targeting = false
 
     var body: some View {
         VStack(spacing: 6) {

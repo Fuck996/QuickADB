@@ -10,7 +10,7 @@ if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then
 fi
 sdk_version=$(xcrun --sdk macosx --show-sdk-version)
 if (( ${sdk_version%%.*} < 27 )); then
-    echo "需要 macOS 27 SDK，当前为 $sdk_version。请在 Xcode 中选择对应版本的命令行工具。" >&2
+    echo "需要 macOS 27 SDK，当前为 $sdk_version。请选择带对应 SDK 的开发工具。" >&2
     exit 1
 fi
 
@@ -37,6 +37,7 @@ CARGO_PROFILE_RELEASE_STRIP=none cargo rustc --locked --release --lib --crate-ty
     --target "$rust_target" --target-dir "$target"
 xcrun --sdk macosx swiftc \
     -target arm64-apple-macos27.0 -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
+    -module-cache-path "$target/swift-module-cache" \
     -swift-version 5 -O -whole-module-optimization -parse-as-library -module-name QuickADB \
     -I "$source/QuickADBBridge" "$source/"*.swift \
     -L "$target/$rust_target/release" -lquickadb \

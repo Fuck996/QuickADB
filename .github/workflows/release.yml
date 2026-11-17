@@ -1,0 +1,115 @@
+name: Build and release clients
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quickadb-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v6
+      - name: Test and build Windows x64
+        shell: pwsh
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --release --locked --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --release --locked --target x86_64-pc-windows-msvc --bin QuickADB
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $copy = Join-Path $env:RUNNER_TEMP 'quickadb-publish-copy'
+          New-Item -ItemType Directory -Path $copy -Force | Out-Null
+          ./scripts/Publish.ps1 -DestinationDirectory $copy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: artifacts/QuickADB-*-x64.exe
+          if-no-files-found: error
+
+  macos:
+    runs-on: xcode-27
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Test with an isolated keychain and build the macOS installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-apple-darwin
+          directory=$(mktemp -d "$RUNNER_TEMP/quickadb-keychain.XXXXXXXX")
+          keychain="$directory/tests.keychain-db"
+          trap 'security delete-keychain "$keychain"; rmdir "$directory"' EXIT
+          password=$(openssl rand -hex 24)
+          security create-keychain -p "$password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          security default-keychain -d user -s "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          cargo test --locked --target aarch64-apple-darwin
+          bash scripts/Package-Mac.sh 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-installer
+          path: |
+            artifacts/macos/*.dmg
+            artifacts/macos/*.dmg.sha256
+          if-no-files-found: error
+
+  source:
+    needs: [windows, macos]
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-exe
+          path: artifacts
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-installer
+          path: artifacts/macos
+      - name: Package complete corresponding source and license text
+        shell: pwsh
+        run: |
+          ./scripts/Publish-Source.ps1 -Revision $env:GITHUB_SHA
+          $images = @(Get-ChildItem -LiteralPath artifacts/macos -Filter '*.dmg' -File)
+          if ($images.Count -ne 1) { throw '必须有且仅有一个 macOS 安装镜像。' }
+          ./scripts/Publish-Source.ps1 -Revision $env:GITHUB_SHA -MacDiskImage $images[0].FullName
+      - uses: actions/upload-artifact@v4
+        with:
+          name: corresponding-source
+          path: artifacts/*.zip
+          if-no-files-found: error
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: source
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*'
+          merge-multiple: true
+          path: artifacts/release
+      - name: Verify and publish both versions
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/Publish-GitHub.sh

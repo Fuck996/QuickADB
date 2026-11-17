@@ -22,8 +22,8 @@ enum Appearance: String, CaseIterable {
 struct Preferences: View {
     let model: BackendModel
     @AppStorage("appearance") private var appearance = Appearance.system
-    @State private var loginStatus = SMAppService.mainApp.status
-    @State private var loginError: String?
+    @ViewState private var loginStatus = SMAppService.mainApp.status
+    @ViewState private var loginError: String?
 
     var body: some View {
         Form {

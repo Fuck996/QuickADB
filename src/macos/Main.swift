@@ -5,6 +5,9 @@ import AppKit
 import CoreServices
 import SwiftUI
 
+// Use SwiftUI's property wrapper with Command Line Tools, which ship without the State macro plugin.
+typealias ViewState<Value> = SwiftUI.State<Value>
+
 @main
 @MainActor
 enum QuickADBApp {
