@@ -1,15 +1,13 @@
 name: macOS beta build
 
-on:
-  push:
-    tags:
-      - 'mac-ci-*'
+on: create
 
 permissions:
   contents: read
 
 jobs:
   macos-beta:
+    if: startsWith(github.ref, 'refs/tags/mac-ci-')
     runs-on: xcode-27
     timeout-minutes: 35
     steps:
