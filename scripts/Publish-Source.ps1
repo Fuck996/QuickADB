@@ -5,7 +5,8 @@
 param(
     [string]$Revision = 'HEAD',
     [string]$BinaryRevision,
-    [string]$RegistryDirectory
+    [string]$RegistryDirectory,
+    [string]$MacDiskImage
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
@@ -21,22 +22,37 @@ try {
     }
     $version = $Matches[1]
     $artifacts = Join-Path $projectRoot 'artifacts'
-    $stage = Join-Path $artifacts ("source-$version-" + $commit.Substring(0, 8))
+    $releaseVersion = $version
+    $platform = 'x86_64-pc-windows-msvc'
+    if ($MacDiskImage) {
+        $binary = Get-Item -LiteralPath $MacDiskImage
+        if ($binary.PSIsContainer -or $binary.Name -cnotmatch "^QuickADB-$([regex]::Escape($version))-mac-beta\.([1-9][0-9]*)-arm64\.dmg$") {
+            throw 'DMG 文件名与源码版本不匹配。'
+        }
+        $releaseVersion = "$version-mac-beta.$($Matches[1])"
+        $platform = 'aarch64-apple-darwin'
+    } else {
+        $binary = Get-Item -LiteralPath (Join-Path $artifacts "QuickADB-$version-x64.exe")
+    }
+    $binaryHash = (Get-FileHash -LiteralPath $binary.FullName -Algorithm SHA256).Hash
+    if ($MacDiskImage) {
+        $expected = (Get-Content -LiteralPath ($binary.FullName + '.sha256') -Raw).Trim()
+        if ($expected -ine "$binaryHash  $($binary.Name)") { throw 'DMG 的 SHA-256 校验失败。' }
+    }
+    $stage = Join-Path $artifacts ("source-$releaseVersion-" + $commit.Substring(0, 8))
     if (Test-Path -LiteralPath $stage) { throw "源码暂存目录已存在：$stage" }
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
     $stageCreated = $true
     $tracked = Join-Path $stage 'tracked.zip'
     & git archive --format=zip "--output=$tracked" $commit
     if ($LASTEXITCODE -ne 0) { throw '导出已提交源码失败。' }
-    $sourceRoot = Join-Path $stage "QuickADB-$version-source"
+    $sourceRoot = Join-Path $stage "QuickADB-$releaseVersion-source"
     Expand-Archive -LiteralPath $tracked -DestinationPath $sourceRoot
     Remove-Item -LiteralPath $tracked
     if ($BinaryRevision) {
         $binaryCommit = & git rev-parse --verify "$BinaryRevision^{commit}"
-        if ($LASTEXITCODE -ne 0) { throw '无法确认 EXE 对应提交。' }
+        if ($LASTEXITCODE -ne 0) { throw '无法确认发布产物对应提交。' }
     } else { $binaryCommit = $commit }
-    $executable = Join-Path $artifacts "QuickADB-$version-x64.exe"
-    if (!(Test-Path -LiteralPath $executable -PathType Leaf)) { throw '缺少本版本已验证的发布 EXE。' }
     $registryTarget = Join-Path $sourceRoot 'vendor\registry'
     if ($RegistryDirectory) {
         Copy-Item -LiteralPath $RegistryDirectory -Destination $registryTarget -Recurse
@@ -48,19 +64,36 @@ try {
         }
         finally { Pop-Location }
     }
-    [pscustomobject]@{
-        Version = $version
+    $sourceInfo = [ordered]@{
+        Version = $releaseVersion
         SourceCommit = $commit
         BinaryCommit = $binaryCommit
-        Executable = Split-Path $executable -Leaf
-        ExecutableSHA256 = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash
-        License = 'GPL-3.0-only; attribution term in NOTICE under section 7(b)'
-    } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $sourceRoot 'SOURCE_INFO.json') -Encoding utf8NoBOM
+    }
+    if ($MacDiskImage) {
+        $sourceInfo.Artifact = $binary.Name
+        $sourceInfo.ArtifactSHA256 = $binaryHash
+    } else {
+        $sourceInfo.Executable = $binary.Name
+        $sourceInfo.ExecutableSHA256 = $binaryHash
+    }
+    $sourceInfo.License = 'GPL-3.0-only; attribution term in NOTICE under section 7(b)'
+    $sourceInfo | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $sourceRoot 'SOURCE_INFO.json') -Encoding utf8NoBOM
     $sourcePath = $sourceRoot.Replace('\', '/')
+    if ($MacDiskImage) {
+        New-Item -ItemType Directory -Path (Join-Path $sourceRoot '.cargo') -Force | Out-Null
+        @'
+[source.crates-io]
+replace-with = "vendored-sources"
+[source.vendored-sources]
+directory = "vendor/registry"
+[net]
+offline = true
+'@ | Set-Content -LiteralPath (Join-Path $sourceRoot '.cargo/config.toml') -Encoding utf8NoBOM
+    }
     $packageCargoHome = $env:CARGO_HOME
     $env:CARGO_HOME = Join-Path $stage 'check-cargo'
     try {
-        $metadata = & cargo metadata --manifest-path "$sourceRoot\Cargo.toml" --format-version 1 --locked --offline --filter-platform x86_64-pc-windows-msvc --config "source.crates-io.replace-with='vendored-sources'" --config "source.vendored-sources.directory='$sourcePath/vendor/registry'"
+        $metadata = & cargo metadata --manifest-path "$sourceRoot\Cargo.toml" --format-version 1 --locked --offline --filter-platform $platform --config "source.crates-io.replace-with='vendored-sources'" --config "source.vendored-sources.directory='$sourcePath/vendor/registry'"
         if ($LASTEXITCODE -ne 0) { throw '源码包的锁定依赖离线验证失败。' }
     }
     finally { $env:CARGO_HOME = $packageCargoHome }
@@ -70,12 +103,12 @@ try {
             throw "发现源码包以外的依赖：$($package.name)"
         }
     }
-    $fileName = "QuickADB-$version-source.zip"
+    $fileName = "QuickADB-$releaseVersion-source.zip"
     $archive = Join-Path $artifacts $fileName
     if (Test-Path -LiteralPath $archive) { throw "源码包已存在，不自动覆盖：$archive" }
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [IO.Compression.ZipFile]::CreateFromDirectory($sourceRoot, $archive, [IO.Compression.CompressionLevel]::Optimal, $true)
-    $legalRoot = Join-Path $stage "QuickADB-$version-legal"
+    $legalRoot = Join-Path $stage "QuickADB-$releaseVersion-legal"
     New-Item -ItemType Directory -Path $legalRoot | Out-Null
     $legalFiles = @('LICENSE', 'NOTICE', 'THIRD_PARTY.md', 'Cargo.lock', 'SOURCE_INFO.json', 'docs/licensing.md', 'assets/ThirdPartyNotices.txt', 'vendor/README.md', 'vendor/droidmux/LICENSE-MIT', 'vendor/droidmux/LICENSE-APACHE', 'vendor/eframe/LICENSE-MIT', 'vendor/eframe/LICENSE-APACHE')
     $legalFiles += Get-ChildItem -LiteralPath (Join-Path $sourceRoot 'assets/licenses') -Recurse -File | ForEach-Object { [IO.Path]::GetRelativePath($sourceRoot, $_.FullName) }
@@ -87,18 +120,18 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $legalRoot 'licenses') | Out-Null
     Copy-Item -LiteralPath (Join-Path $registryTarget 'libusb1-sys-0.7.0/libusb/COPYING') -Destination (Join-Path $legalRoot 'licenses/libusb-LGPL-2.1.txt')
     @"
-QuickADB $version 许可与来源声明
+QuickADB $releaseVersion 许可与来源声明
 
-请将本声明与 QuickADB-$version-x64.exe 一同保留和分发。
+请将本声明与 $($binary.Name) 一同保留和分发。
 原创部分：GPL-3.0-only，来源保留条款见 NOTICE；第三方组件保留各自许可。
 允许商用；分发受 GPL 覆盖的修改或整合版本，必须提供完整对应源码。
 
 原项目：https://github.com/Fuck996/QuickADB
-对应源码：https://github.com/Fuck996/QuickADB/releases/download/v$version/QuickADB-$version-source.zip
+对应源码：https://github.com/Fuck996/QuickADB/releases/download/v$releaseVersion/QuickADB-$releaseVersion-source.zip
 源码包包含依赖、资源、静态 libusb 源码与离线构建脚本。
-SOURCE_INFO.json 记录源提交及 EXE 校验值。
+SOURCE_INFO.json 记录源提交及发布产物校验值。
 "@ | Set-Content -LiteralPath (Join-Path $legalRoot 'README-LEGAL.txt') -Encoding utf8NoBOM
-    $legalArchive = Join-Path $artifacts "QuickADB-$version-legal.zip"
+    $legalArchive = Join-Path $artifacts "QuickADB-$releaseVersion-legal.zip"
     if (Test-Path -LiteralPath $legalArchive) { throw "许可包已存在，不自动覆盖：$legalArchive" }
     [IO.Compression.ZipFile]::CreateFromDirectory($legalRoot, $legalArchive, [IO.Compression.CompressionLevel]::Optimal, $true)
     [pscustomobject]@{

@@ -1,0 +1,44 @@
+name: macOS beta build
+
+on:
+  push:
+    tags:
+      - 'mac-ci-*'
+
+permissions:
+  contents: read
+
+jobs:
+  macos-beta:
+    runs-on: xcode-27
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+      - name: Record toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
+          rustup target add aarch64-apple-darwin
+          rustc --version
+      - name: Run protocol fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          directory=$(mktemp -d "$RUNNER_TEMP/quickadb-keychain.XXXXXXXX")
+          keychain="$directory/tests.keychain-db"
+          trap 'security delete-keychain "$keychain"; rmdir "$directory"' EXIT
+          password=$(openssl rand -hex 24)
+          security create-keychain -p "$password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          security default-keychain -d user -s "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          cargo test --locked --target aarch64-apple-darwin
+      - name: Build and verify the installer
+        run: bash scripts/Package-Mac.sh 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-beta-${{ github.sha }}
+          path: |
+            artifacts/macos/*.dmg
+            artifacts/macos/*.dmg.sha256
+          if-no-files-found: error

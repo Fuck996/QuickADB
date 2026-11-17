@@ -16,6 +16,8 @@ bash scripts/Build-Mac.sh
 open artifacts/macos/QuickADB.app
 ```
 
+测试版安装镜像使用 `bash scripts/Package-Mac.sh 1` 构建。脚本会生成带版本号的 `.dmg` 和 SHA-256 校验文件，并以只读方式挂载镜像验证其中的应用、签名和「应用程序」快捷入口。
+
 构建脚本会验证签名及系统动态库依赖。默认使用临时签名做本机测试。使用已安装的签名身份时，通过 `QUICKADB_SIGN_IDENTITY` 指定。macOS 通过签名识别本地网络授权，验证 Finder 启动后的权限和配对时使用同一签名身份。对外发布还需完成签名和公证。 [Apple 本地网络隐私说明](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy) · [Apple 公证说明](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
 
 设置和日志保存在 `~/Library/Application Support/QuickADB`。macOS 在当前用户的钥匙串里保存 ADB 授权私钥。首次在 Mac 使用时，在 Android 上授予该 Mac 的 USB 调试权限或完成无线配对。

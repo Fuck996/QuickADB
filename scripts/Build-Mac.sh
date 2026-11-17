@@ -46,6 +46,9 @@ xcrun --sdk macosx swiftc \
 cp "$source/Info.plist" "$contents/Info.plist"
 plutil -replace CFBundleShortVersionString -string "$version" "$contents/Info.plist"
 plutil -replace CFBundleVersion -string "$version" "$contents/Info.plist"
+if [[ -n "${QUICKADB_MAC_BETA:-}" ]]; then
+    plutil -replace CFBundleDisplayName -string "QuickADB 测试版" "$contents/Info.plist"
+fi
 plutil -lint "$contents/Info.plist"
 cp NOTICE LICENSE assets/ThirdPartyNotices.txt "$resources/"
 
