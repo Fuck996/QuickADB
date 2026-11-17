@@ -1,6 +1,6 @@
 # QuickADB for macOS
 
-首版源码面向 Apple 芯片 Mac 和 macOS 27。SwiftUI 和 AppKit 提供原生窗口、侧栏、工具栏、菜单栏抽屉与设置。工具栏和抽屉控制使用系统 Liquid Glass，APK 与任务列表沿用系统文字、对比度和主题。应用与菜单栏分别使用项目现有的黑色应用图标和绿色安装箭头。 [Apple 的 Liquid Glass 指南](https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass)
+首版源码面向 Apple 芯片 Mac 和 macOS 27。SwiftUI 和 AppKit 提供原生窗口、侧栏、工具栏、菜单栏抽屉与设置。工具栏和抽屉控制使用系统 Liquid Glass，APK 与任务列表沿用系统文字、对比度和主题。应用使用项目现有的黑色图标。菜单栏使用系统安装箭头，并随菜单栏外观自动调整颜色。 [Apple 的 Liquid Glass 指南](https://developer.apple.com/documentation/technologyoverviews/adopting-liquid-glass)
 
 主窗口和菜单栏抽屉共用 Rust ADB 后端、设备选择与任务队列。支持 USB、局域网无线发现、配对、传统 TCP、单包、批量与拆分 APK。拖入或选取后先检查 APK，点击安装时才按当前选择提交。同一设备串行，不同设备并行。传输显示已确认字节，Android 提交阶段使用不定进度。
 

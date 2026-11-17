@@ -62,8 +62,6 @@ for size in 16 32 128 256 512; do
         --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$iconset" -o "$resources/AppIcon.icns"
-# Trim the source icon to the visible alpha bounds before setting its menu-bar size.
-xcrun --sdk macosx swift scripts/Prepare-MacTrayIcon.swift assets/TrayIcon.png "$resources/TrayIcon.png"
 
 identity=${QUICKADB_SIGN_IDENTITY:--}
 if [[ "$identity" == "-" ]]; then

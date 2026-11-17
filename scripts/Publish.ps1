@@ -28,7 +28,7 @@ $systemLibraries = @(
     'gdi32.dll', 'ole32.dll', 'ntdll.dll', 'combase.dll', 'advapi32.dll',
     'bcryptprimitives.dll', 'ws2_32.dll', 'bcrypt.dll', 'iphlpapi.dll',
     'comctl32.dll', 'crypt32.dll', 'shell32.dll', 'opengl32.dll',
-    'imm32.dll', 'dwmapi.dll', 'uxtheme.dll'
+    'imm32.dll', 'dwmapi.dll', 'uxtheme.dll', 'winhttp.dll'
 )
 foreach ($library in $dependencies) {
     if ($library -notin $systemLibraries -and $library -notlike 'api-ms-win-*.dll') {

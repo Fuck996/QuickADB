@@ -16,6 +16,7 @@ fn main() {
 
 #[cfg(target_os = "windows")]
 fn run() -> anyhow::Result<()> {
+    let previous = quickadb::update::wait_for_previous_process()?;
     let Some(_instance) = quickadb::platform::Instance::acquire()? else {
         return Ok(());
     };
@@ -24,7 +25,7 @@ fn run() -> anyhow::Result<()> {
         quickadb::platform::set_startup(true)?;
     }
     let backend = quickadb::engine::Backend::new(storage.clone())?;
-    ui::run(storage, backend).map_err(|error| anyhow::anyhow!("窗口初始化失败：{error}"))
+    ui::run(storage, backend, previous).map_err(|error| anyhow::anyhow!("窗口初始化失败：{error}"))
 }
 
 #[cfg(not(target_os = "windows"))]

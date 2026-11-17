@@ -152,13 +152,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSToolbarDeleg
     private func makeStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
-            if let path = Bundle.main.url(forResource: "TrayIcon", withExtension: "png"),
-               let icon = NSImage(contentsOf: path) {
-                icon.size = NSSize(width: 18, height: 18)
-                button.image = icon
-            } else {
-                button.image = NSImage(systemSymbolName: "arrow.down.to.line", accessibilityDescription: "QuickADB")
-            }
+            let symbol = NSImage(systemSymbolName: "arrow.down.to.line",
+                                 accessibilityDescription: "QuickADB 安装抽屉")?
+                .withSymbolConfiguration(.init(pointSize: 17, weight: .semibold))
+            symbol?.isTemplate = true
+            button.image = symbol
             button.toolTip = "QuickADB 安装抽屉"
             button.setAccessibilityLabel("QuickADB 安装抽屉")
             button.target = self

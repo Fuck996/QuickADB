@@ -9,9 +9,13 @@ use quickadb::{
     model::{Device, DeviceStatus, Endpoint, Job, JobStage, PreparationState, Settings, Snapshot},
     platform,
     storage::Storage,
+    update::{self, Release},
 };
 use std::{
-    sync::Arc,
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, TryRecvError},
+    },
     time::{Duration, Instant},
 };
 use tray_icon::{
@@ -26,7 +30,11 @@ const WINDOW_SIZE: [f32; 2] = [1080., 800.];
 const GREEN: Color32 = Color32::from_rgb(37, 173, 115);
 const PRIMARY_GREEN: Color32 = Color32::from_rgb(20, 133, 84);
 
-pub fn run(storage: Arc<Storage>, backend: Backend) -> eframe::Result {
+pub fn run(
+    storage: Arc<Storage>,
+    backend: Backend,
+    previous_process: Option<u32>,
+) -> eframe::Result {
     let settings = storage.settings();
     let icon = image::load_from_memory(include_bytes!("../../assets/AppIconDisplay.png"))
         .expect("embedded icon invalid")
@@ -75,7 +83,14 @@ pub fn run(storage: Arc<Storage>, backend: Backend) -> eframe::Result {
         options,
         Box::new(move |cc| {
             configure_fonts(&cc.egui_ctx)?;
-            let app = Drawer::new(cc, storage, backend)?;
+            let mut app = Drawer::new(cc, storage, backend)?;
+            app.next_update_check = Some(Instant::now());
+            if let Some(pid) = previous_process
+                && let Err(error) = update::remove_backup(pid)
+            {
+                app.backend
+                    .notify(&format!("新版已启动，清理更新备份失败：{error:#}"));
+            }
             Ok(Box::new(app))
         }),
     )
@@ -108,10 +123,13 @@ enum Dialog {
         host: String,
         port: String,
         pairing_port: String,
+        pairing_id: Option<String>,
+        manual_pairing: bool,
         code: String,
         paired_id: String,
     },
     Settings,
+    Update,
     Devices,
     Notice {
         message: String,
@@ -137,6 +155,38 @@ enum Dialog {
     Exit,
 }
 
+enum UpdateState {
+    Idle,
+    Checking(Receiver<anyhow::Result<Option<Release>>>),
+    Available(Release),
+    Downloading(Receiver<anyhow::Result<Vec<u8>>>),
+    Ready(Vec<u8>),
+}
+
+fn update_worker<T: Send + 'static>(
+    work: impl FnOnce() -> anyhow::Result<T> + Send + 'static,
+) -> Receiver<anyhow::Result<T>> {
+    let (send, receive) = mpsc::channel();
+    let worker = send.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("quickadb-update".into())
+        .spawn(move || {
+            let _ = worker.send(work());
+        })
+    {
+        let _ = send.send(Err(error.into()));
+    }
+    receive
+}
+
+fn update_result<T>(receiver: &Receiver<anyhow::Result<T>>) -> Option<anyhow::Result<T>> {
+    match receiver.try_recv() {
+        Ok(result) => Some(result),
+        Err(TryRecvError::Empty) => None,
+        Err(TryRecvError::Disconnected) => Some(Err(anyhow::anyhow!("更新任务意外结束"))),
+    }
+}
+
 struct Drawer {
     backend: Backend,
     storage: Arc<Storage>,
@@ -145,7 +195,12 @@ struct Drawer {
     open_menu: MenuItem,
     exit_menu: MenuItem,
     settings_menu: MenuItem,
+    update_menu: MenuItem,
     dialog: Option<Dialog>,
+    update: UpdateState,
+    next_update_check: Option<Instant>,
+    update_notice: String,
+    show_update: bool,
     icon: egui::TextureHandle,
     hidden: bool,
     collapsed: bool,
@@ -174,10 +229,12 @@ impl Drawer {
         let menu = Menu::new();
         let open_menu = MenuItem::new("打开安装抽屉", true, None);
         let settings_menu = MenuItem::new("设置", true, None);
+        let update_menu = MenuItem::new("检查更新", true, None);
         let exit_menu = MenuItem::new("退出 QuickADB", true, None);
         menu.append_items(&[
             &open_menu,
             &settings_menu,
+            &update_menu,
             &tray_icon::menu::PredefinedMenuItem::separator(),
             &exit_menu,
         ])?;
@@ -209,7 +266,12 @@ impl Drawer {
             open_menu,
             exit_menu,
             settings_menu,
+            update_menu,
             dialog: None,
+            update: UpdateState::Idle,
+            next_update_check: None,
+            update_notice: String::new(),
+            show_update: false,
             icon,
             hidden,
             collapsed: false,
@@ -1223,6 +1285,8 @@ impl Drawer {
             host,
             port,
             pairing_port,
+            pairing_id,
+            manual_pairing,
             code,
             paired_id,
         } = dialog
@@ -1237,6 +1301,7 @@ impl Drawer {
         );
         ui.add_space(10.);
         let tab_width = (ui.available_width() - 16.) / 3.;
+        let mut selected_mode = *mode;
         ui.horizontal(|ui| {
             for (value, label) in [(0, "无线配对"), (1, "已配对设备"), (2, "TCP 连接")] {
                 let active = *mode == value;
@@ -1258,12 +1323,14 @@ impl Drawer {
                     )
                     .clicked()
                 {
-                    *mode = value;
-                    code.clear();
-                    port.clear();
+                    selected_mode = value;
                 }
             }
         });
+        if selected_mode != *mode {
+            *dialog = connect_dialog_for(selected_mode);
+            return;
+        }
         ui.add_space(8.);
         egui::Frame::new()
             .fill(if self.preferences.dark {
@@ -1307,20 +1374,34 @@ impl Drawer {
                 }
             });
         ui.add_space(8.);
-        ui.label(
-            RichText::new(format!("局域网发现 · {} 个服务", snapshot.discovered.len())).strong(),
-        );
-        if snapshot.discovered.is_empty() {
+        let visible = snapshot
+            .discovered
+            .iter()
+            .filter(|service| *mode != 0 || service.service_type == AdbServiceType::Pairing)
+            .collect::<Vec<_>>();
+        let selected_pairing = pairing_service(snapshot, pairing_id.as_deref());
+        ui.label(RichText::new(format!("局域网发现 · {} 个服务", visible.len())).strong());
+        if visible.is_empty() {
             ui.label(
-                RichText::new("暂未发现设备，请确认手机已开启无线调试并与电脑在同一局域网。")
-                    .small()
-                    .color(secondary_text(ui)),
+                RichText::new(if *mode == 0 {
+                    "暂未发现可配对设备。请保持手机的配对码弹窗开启。"
+                } else {
+                    "暂未发现设备，请确认手机已开启无线调试并与电脑在同一局域网。"
+                })
+                .small()
+                .color(secondary_text(ui)),
             );
         } else {
             ui.label(
-                RichText::new("自动更新 · 点击设备选择连接方式")
-                    .small()
-                    .color(secondary_text(ui)),
+                RichText::new(if *mode != 0 {
+                    "点击设备选择连接方式"
+                } else if selected_pairing.is_some() {
+                    "地址和端口已自动获取。"
+                } else {
+                    "请从列表选择你的手机。"
+                })
+                .small()
+                .color(secondary_text(ui)),
             );
             let paired = self.storage.paired_devices();
             egui::ScrollArea::vertical()
@@ -1329,7 +1410,7 @@ impl Drawer {
                 .min_scrolled_height(0.)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    for device in &snapshot.discovered {
+                    for device in visible {
                         let endpoint = &device.endpoint;
                         let known_name = snapshot.devices.iter().find_map(|known| {
                             known.endpoint.as_ref().filter(|address| address.host == endpoint.host && address.port == endpoint.port).map(|_| known.name.as_str())
@@ -1339,7 +1420,13 @@ impl Drawer {
                             paired.iter().any(|record| record.device_id == *id)
                         });
                         let kind = match device.service_type {
-                            AdbServiceType::Pairing => "可配对 · 填入配对端口",
+                            AdbServiceType::Pairing
+                                if *mode == 0 && !*manual_pairing
+                                    && selected_pairing.is_some_and(|item| item.fullname == device.fullname) =>
+                            {
+                                "已选中 · 输入六位配对码"
+                            }
+                            AdbServiceType::Pairing => "可配对",
                             AdbServiceType::TlsConnect if authorized_id.is_some() => "已配对 · 自动获取连接端口",
                             AdbServiceType::TlsConnect => "无配对记录 · 在手机打开配对码弹窗",
                             AdbServiceType::Legacy => "传统 TCP · 填入连接端口",
@@ -1360,6 +1447,13 @@ impl Drawer {
                             "设备没有广播型号，当前显示其真实服务名称。连接授权后可读取型号并设置备注。"
                         });
                         if response.clicked() {
+                            if *mode == 0 && !*manual_pairing
+                                && selected_pairing.is_some_and(|item| item.fullname == device.fullname)
+                            {
+                                continue;
+                            }
+                            *manual_pairing = false;
+                            *pairing_id = None;
                             *host = endpoint.host.clone();
                             pairing_port.clear();
                             port.clear();
@@ -1368,7 +1462,7 @@ impl Drawer {
                             match device.service_type {
                                 AdbServiceType::Pairing => {
                                     *mode = 0;
-                                    *pairing_port = endpoint.port.to_string();
+                                    *pairing_id = Some(device.fullname.clone());
                                 }
                                 AdbServiceType::TlsConnect => {
                                     if let Some(id) = authorized_id {
@@ -1438,24 +1532,34 @@ impl Drawer {
                 ui.add_space(6.);
             }
         }
-        if *mode != 1 {
-            field(ui, "手机 IP 地址", host, false, "例如 192.168.1.8");
-        }
+        let selected_pairing = pairing_service(snapshot, pairing_id.as_deref());
         if *mode == 0 {
-            ui.columns(2, |columns| {
-                field(
-                    &mut columns[0],
-                    "配对端口",
-                    pairing_port,
-                    false,
-                    "配对弹窗中的端口",
-                );
-                field(&mut columns[1], "六位配对码", code, true, "输入 6 位数字");
+            if ui
+                .checkbox(manual_pairing, "手动输入 IP 地址和配对端口")
+                .changed()
+            {
+                code.clear();
+                port.clear();
+            }
+            if *manual_pairing {
+                field(ui, "手机 IP 地址", host, false, "例如 192.168.1.8");
+                field(ui, "配对端口", pairing_port, false, "配对弹窗中的端口");
+            }
+            ui.add_enabled_ui(*manual_pairing || selected_pairing.is_some(), |ui| {
+                let previous = code.clone();
+                field(ui, "六位配对码", code, true, "输入 6 位数字");
+                if *code != previous
+                    && !*manual_pairing
+                    && let Some(service) = selected_pairing
+                {
+                    *pairing_id = Some(service.fullname.clone());
+                }
             });
         }
         if *mode == 2 {
+            field(ui, "手机 IP 地址", host, false, "例如 192.168.1.8");
             field(ui, "连接端口", port, false, "通常为 5555，以设备设置为准");
-        } else {
+        } else if *mode == 1 || *manual_pairing {
             ui.label(
                 RichText::new(if port.trim().is_empty() {
                     "连接端口自动发现，无需填写。"
@@ -1485,14 +1589,31 @@ impl Drawer {
         if !port.trim().is_empty() && !port.trim().parse::<u16>().is_ok_and(|p| p > 0) {
             ui.colored_label(ui.visuals().error_fg_color, "连接端口需为 1–65535 的整数。");
         }
-        let valid = !host.trim().is_empty()
-            && ((*mode != 2 && port.trim().is_empty())
-                || port.trim().parse::<u16>().is_ok_and(|p| p > 0))
-            && (*mode != 0
-                || (pairing_port.parse::<u16>().is_ok_and(|p| p > 0)
+        let connection_port = port.trim().parse::<u16>().ok().filter(|&p| p > 0);
+        let pairing_address = if *manual_pairing {
+            pairing_port
+                .trim()
+                .parse::<u16>()
+                .ok()
+                .filter(|&p| p > 0 && !host.trim().is_empty())
+                .map(|p| (host.trim(), p))
+        } else {
+            selected_pairing.map(|item| (item.endpoint.host.as_str(), item.endpoint.port))
+        };
+        let valid = match *mode {
+            0 => {
+                pairing_address.is_some()
                     && code.len() == 6
-                    && code.bytes().all(|b| b.is_ascii_digit())))
-            && (*mode != 1 || !paired_id.is_empty());
+                    && code.bytes().all(|b| b.is_ascii_digit())
+                    && (!*manual_pairing || port.trim().is_empty() || connection_port.is_some())
+            }
+            1 => {
+                !paired_id.is_empty()
+                    && (port.trim().is_empty()
+                        || (connection_port.is_some() && !host.trim().is_empty()))
+            }
+            _ => connection_port.is_some() && !host.trim().is_empty(),
+        };
         if snapshot.pairing {
             ui.horizontal(|ui| {
                 ui.spinner();
@@ -1511,18 +1632,19 @@ impl Drawer {
             .inner
             .clicked()
         {
-            let connection_port = if port.trim().is_empty() {
-                None
-            } else {
-                Some(port.trim().parse().expect("validated port"))
-            };
             if *mode == 0 {
-                self.backend.pair(
-                    host.trim().into(),
-                    pairing_port.parse().expect("validated pairing port"),
-                    code.clone(),
-                    connection_port,
-                );
+                if let Some((host, pairing_port)) = pairing_address {
+                    self.backend.pair(
+                        host.into(),
+                        pairing_port,
+                        code.clone(),
+                        if *manual_pairing {
+                            connection_port
+                        } else {
+                            None
+                        },
+                    );
+                }
             } else if *mode == 1 && connection_port.is_none() {
                 self.backend.connect_paired(paired_id.clone());
             } else {
@@ -1541,6 +1663,141 @@ impl Drawer {
         }
     }
 
+    fn start_update_check(&mut self, now: Instant) {
+        self.next_update_check = Some(now + Duration::from_secs(24 * 60 * 60));
+        self.update_notice.clear();
+        self.update = UpdateState::Checking(update_worker(update::check));
+    }
+
+    fn open_update(&mut self, ctx: &egui::Context) {
+        if matches!(self.update, UpdateState::Idle) {
+            self.start_update_check(Instant::now());
+        }
+        self.show_update = false;
+        self.dialog = Some(Dialog::Update);
+        if self.collapsed {
+            self.collapsed = false;
+            self.position_checked = false;
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(WIDTH, HEIGHT)));
+        }
+        self.show(ctx, None);
+    }
+
+    fn poll_update(&mut self, ctx: &egui::Context) {
+        if self.exiting {
+            return;
+        }
+        let now = Instant::now();
+        if matches!(self.update, UpdateState::Idle)
+            && self.next_update_check.is_some_and(|due| now >= due)
+        {
+            self.start_update_check(now);
+        }
+        match &self.update {
+            UpdateState::Checking(receiver) => {
+                if let Some(result) = update_result(receiver) {
+                    self.update = match result {
+                        Ok(Some(release)) => {
+                            self.show_update = !matches!(self.dialog, Some(Dialog::Update));
+                            UpdateState::Available(release)
+                        }
+                        Ok(None) => {
+                            self.update_notice = "已是最新正式版。".into();
+                            UpdateState::Idle
+                        }
+                        Err(error) => {
+                            self.update_notice = format!("检查更新失败：{error:#}");
+                            UpdateState::Idle
+                        }
+                    };
+                }
+            }
+            UpdateState::Downloading(receiver) => {
+                if let Some(result) = update_result(receiver) {
+                    self.update = match result {
+                        Ok(bytes) => UpdateState::Ready(bytes),
+                        Err(error) => {
+                            self.update_notice = format!("下载更新失败：{error:#}");
+                            self.show_update = !matches!(self.dialog, Some(Dialog::Update));
+                            UpdateState::Idle
+                        }
+                    };
+                }
+            }
+            UpdateState::Ready(bytes) if !update_blocked(&self.backend.snapshot()) => {
+                match update::install(bytes) {
+                    Ok(()) => {
+                        self.exiting = true;
+                        ctx.send_viewport_cmd(ViewportCommand::Close);
+                    }
+                    Err(error) => {
+                        self.update_notice = format!("安装更新失败：{error:#}");
+                        self.show_update = !matches!(self.dialog, Some(Dialog::Update));
+                        self.update = UpdateState::Idle;
+                    }
+                }
+            }
+            _ => {}
+        }
+        if self.show_update && self.dialog.is_none() {
+            self.show_update = false;
+            self.dialog = Some(Dialog::Update);
+            if self.collapsed {
+                self.collapsed = false;
+                self.position_checked = false;
+                ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(WIDTH, HEIGHT)));
+            }
+            self.show(ctx, None);
+        }
+    }
+
+    fn update_dialog(&mut self, ui: &mut egui::Ui, close: &mut bool) {
+        modal_heading(ui, "QuickADB 更新", close);
+        ui.label(concat!("当前版本 ", env!("CARGO_PKG_VERSION")));
+        match &self.update {
+            UpdateState::Idle => {
+                ui.label(&self.update_notice);
+                if ui.button("重新检查").clicked() {
+                    self.start_update_check(Instant::now());
+                }
+            }
+            UpdateState::Checking(_) => {
+                ui.spinner();
+                ui.label("正在检查 GitHub 正式版…");
+            }
+            UpdateState::Available(release) => {
+                ui.label(RichText::new(format!("发现新版本 {}", release.version)).strong());
+                ui.hyperlink_to("查看更新说明、对应源码和许可证", &release.page);
+                ui.label("下载完成并校验后，QuickADB 将在当前任务结束时安装更新并重新打开。");
+                ui.add_space(8.);
+                let release = release.clone();
+                ui.horizontal(|ui| {
+                    if ui.button("稍后").clicked() {
+                        self.update = UpdateState::Idle;
+                        *close = true;
+                    } else if ui.add(primary_button("下载并更新")).clicked() {
+                        self.update = UpdateState::Downloading(update_worker(move || {
+                            update::download(&release)
+                        }));
+                    }
+                });
+            }
+            UpdateState::Downloading(_) | UpdateState::Ready(_) => {
+                ui.spinner();
+                ui.label(if matches!(self.update, UpdateState::Ready(_)) {
+                    "更新已校验，等待当前任务结束…"
+                } else {
+                    "正在从 GitHub 下载并校验更新…"
+                });
+                if ui.button("取消本次更新").clicked() {
+                    self.update = UpdateState::Idle;
+                    self.update_notice = "本次更新已取消。".into();
+                    *close = true;
+                }
+            }
+        }
+    }
+
     fn dialogs(&mut self, ctx: &egui::Context, snapshot: &Snapshot) {
         let Some(mut dialog) = self.dialog.take() else {
             return;
@@ -1556,6 +1813,7 @@ impl Drawer {
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
             match &mut dialog {
+                Dialog::Update => self.update_dialog(ui, &mut close),
                 Dialog::Connect { .. } => self.connection_form(ui, snapshot, &mut dialog, &mut close),
                 Dialog::Settings => {
                     modal_heading(ui, "设置", &mut close);
@@ -1591,6 +1849,7 @@ impl Drawer {
                     if ui.small_button("复制数据目录").clicked() { ctx.copy_text(self.storage.directory.display().to_string()); }
                     ui.separator();
                     ui.label(RichText::new(concat!("QuickADB ", env!("CARGO_PKG_VERSION"))).small().color(secondary_text(ui)));
+                    if ui.small_button("检查更新").clicked() { self.open_update(ctx); close = true; }
                     ui.label(RichText::new("© 2026 QuickADB contributors · GPLv3").small().color(secondary_text(ui)));
                     ui.label(RichText::new("按现状提供，不作担保。").small().color(secondary_text(ui)));
                     ui.hyperlink_to("项目与对应源码", concat!("https://github.com/Fuck996/QuickADB/releases/tag/v", env!("CARGO_PKG_VERSION")));
@@ -1723,6 +1982,10 @@ impl Drawer {
         });
         if !close && !response.should_close() {
             self.dialog = Some(dialog);
+        } else if matches!(dialog, Dialog::Update)
+            && matches!(self.update, UpdateState::Available(_))
+        {
+            self.update = UpdateState::Idle;
         }
     }
 }
@@ -1803,6 +2066,8 @@ impl eframe::App for Drawer {
                 self.show(ctx, None);
             } else if event.id == *self.exit_menu.id() {
                 self.request_exit(ctx);
+            } else if event.id == *self.update_menu.id() {
+                self.open_update(ctx);
             } else if event.id == *self.settings_menu.id() {
                 self.show(ctx, None);
                 self.dialog = Some(Dialog::Settings);
@@ -1860,6 +2125,7 @@ impl eframe::App for Drawer {
                 }
             }
         }
+        self.poll_update(ctx);
         ctx.request_repaint_after(Duration::from_millis(if self.hidden { 250 } else { 100 }));
     }
 
@@ -2082,12 +2348,40 @@ impl Drawer {
     }
 }
 
+fn update_blocked(snapshot: &Snapshot) -> bool {
+    snapshot.connecting
+        || snapshot.pairing
+        || !snapshot.managing.is_empty()
+        || snapshot.jobs.iter().any(|job| job.stage.active())
+}
+
+fn pairing_service<'a>(
+    snapshot: &'a Snapshot,
+    selected: Option<&str>,
+) -> Option<&'a quickadb::model::DiscoveredDevice> {
+    let mut services = snapshot
+        .discovered
+        .iter()
+        .filter(|item| item.service_type == AdbServiceType::Pairing);
+    if let Some(id) = selected {
+        return services.find(|item| item.fullname == id);
+    }
+    let first = services.next()?;
+    services.next().is_none().then_some(first)
+}
+
 fn connect_dialog() -> Dialog {
+    connect_dialog_for(0)
+}
+
+fn connect_dialog_for(mode: u8) -> Dialog {
     Dialog::Connect {
-        mode: 0,
+        mode,
         host: String::new(),
         port: String::new(),
         pairing_port: String::new(),
+        pairing_id: None,
+        manual_pairing: false,
         code: String::new(),
         paired_id: String::new(),
     }

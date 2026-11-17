@@ -16,3 +16,5 @@ pub mod platform;
 #[path = "platform_macos.rs"]
 pub mod platform;
 pub mod storage;
+#[cfg(any(target_os = "windows", test))]
+pub mod update;
