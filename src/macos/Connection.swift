@@ -16,6 +16,7 @@ struct ConnectionSheet: View {
     @State private var host = ""
     @State private var port = ""
     @State private var code = ""
+    @State private var pairingId: String?
     @State private var pairedId = ""
     @State private var manual = false
 
@@ -36,12 +37,14 @@ struct ConnectionSheet: View {
 
             VStack(alignment: .leading, spacing: 5) {
                 Text("局域网发现").font(.headline)
-                if model.snapshot.discovered.isEmpty {
-                    Text("暂未发现设备。请开启手机的无线调试，并确认 QuickADB 获准访问本地网络。")
+                if visibleServices.isEmpty {
+                    Text(mode == .pair
+                         ? "正在查找可配对设备。请保持手机的配对码弹窗开启，并允许 QuickADB 访问本地网络。"
+                         : "暂未发现设备。请开启手机的无线调试，并确认 QuickADB 获准访问本地网络。")
                         .font(.callout).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 } else {
-                    List(model.snapshot.discovered) { service in
+                    List(visibleServices) { service in
                         Button { choose(service) } label: {
                             HStack {
                                 VStack(alignment: .leading, spacing: 3) {
@@ -50,7 +53,13 @@ struct ConnectionSheet: View {
                                         .font(.caption).foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                Image(systemName: "chevron.forward").foregroundStyle(.secondary)
+                                if mode == .pair {
+                                    if service.id == pairingService?.id && !manual {
+                                        Image(systemName: "checkmark").foregroundStyle(Color.accentColor)
+                                    }
+                                } else {
+                                    Image(systemName: "chevron.forward").foregroundStyle(.secondary)
+                                }
                             }
                             .contentShape(.rect)
                         }
@@ -66,10 +75,21 @@ struct ConnectionSheet: View {
             Group {
                 switch mode {
                 case .pair:
-                    Text("在 Android 的无线调试页面打开「使用配对码配对设备」，输入手机显示的地址、配对端口和六位码。")
+                    Text("在手机的无线调试设置中打开「使用配对码配对设备」。发现多台设备时，请先选择你的手机。")
                         .font(.callout).foregroundStyle(.secondary)
-                    addressFields(label: "配对端口")
-                    SecureField("六位配对码", text: $code).textFieldStyle(.roundedBorder)
+                    DisclosureGroup("手动输入 IP 地址和配对端口", isExpanded: Binding(
+                        get: { manual }, set: { manual = $0; code = "" }
+                    )) {
+                        addressFields(label: "配对端口").padding(.top, 6)
+                    }
+                    SecureField("六位配对码", text: Binding(get: { code }, set: { value in
+                        if !manual, let service = pairingService {
+                            pairingId = service.id
+                        }
+                        code = value
+                    }))
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(!manual && pairingService == nil)
                 case .paired:
                     let paired = model.snapshot.devices.filter { $0.pairedId != nil }
                     if paired.isEmpty {
@@ -117,10 +137,25 @@ struct ConnectionSheet: View {
     private var busy: Bool { model.snapshot.pairing || model.snapshot.connecting }
     private var addressValid: Bool { !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && (UInt16(port) ?? 0) > 0 }
 
+    private var pairingServices: [Service] { model.snapshot.discovered.filter { $0.kind == .pairing } }
+
+    private var visibleServices: [Service] {
+        mode == .pair ? pairingServices : model.snapshot.discovered
+    }
+
+    private var pairingService: Service? {
+        if let pairingId {
+            return pairingServices.first { $0.id == pairingId }
+        }
+        return pairingServices.count == 1 ? pairingServices.first : nil
+    }
+
     private var canSubmit: Bool {
         guard !busy else { return false }
         switch mode {
-        case .pair: return addressValid && code.utf8.count == 6 && code.utf8.allSatisfy { (48...57).contains($0) }
+        case .pair:
+            return (manual ? addressValid : pairingService != nil)
+                && code.utf8.count == 6 && code.utf8.allSatisfy { (48...57).contains($0) }
         case .paired: return !pairedId.isEmpty && (!manual || addressValid)
         case .tcp: return addressValid
         }
@@ -138,6 +173,7 @@ struct ConnectionSheet: View {
         host = ""
         port = ""
         code = ""
+        pairingId = nil
         pairedId = ""
         manual = false
     }
@@ -149,12 +185,18 @@ struct ConnectionSheet: View {
         case .tls: newMode = service.pairedId == nil ? .pair : .paired
         case .tcp: newMode = .tcp
         }
-        // Only selecting the segmented control resets its fields.
+        if service.kind == .pairing, mode == .pair, !manual, pairingService?.id == service.id {
+            return
+        }
         mode = newMode
         resetAddress()
+        if service.kind == .pairing {
+            pairingId = service.id
+            return
+        }
         host = service.endpoint.host
         pairedId = service.pairedId ?? ""
-        if service.kind == .pairing || service.kind == .tcp {
+        if service.kind == .tcp {
             port = String(service.endpoint.port)
         }
     }
@@ -163,7 +205,13 @@ struct ConnectionSheet: View {
         let command: Command
         switch mode {
         case .pair:
-            command = Command(.pair, host: host, port: UInt16(port), code: code)
+            if manual {
+                command = Command(.pair, host: host.trimmingCharacters(in: .whitespacesAndNewlines),
+                                  port: UInt16(port), code: code)
+            } else {
+                guard let endpoint = pairingService?.endpoint else { return }
+                command = Command(.pair, host: endpoint.host, port: endpoint.port, code: code)
+            }
         case .paired:
             command = Command(.connectPaired, id: pairedId, host: manual ? host : nil,
                               port: manual ? UInt16(port) : nil)
