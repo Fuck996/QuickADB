@@ -1416,7 +1416,7 @@ impl Drawer {
                             known.endpoint.as_ref().filter(|address| address.host == endpoint.host && address.port == endpoint.port).map(|_| known.name.as_str())
                         });
                         let name = known_name.unwrap_or(&device.name);
-                        let authorized_id = device.paired_id().filter(|id| {
+                        let authorized_id = snapshot.paired_device_id(device).filter(|id| {
                             paired.iter().any(|record| record.device_id == *id)
                         });
                         let kind = match device.service_type {
@@ -1502,7 +1502,7 @@ impl Drawer {
                             snapshot
                                 .discovered
                                 .iter()
-                                .find(|d| d.paired_id() == Some(id))
+                                .find(|d| snapshot.paired_device_id(d) == Some(id))
                                 .map(|d| d.name.as_str())
                         })
                         .unwrap_or(id);

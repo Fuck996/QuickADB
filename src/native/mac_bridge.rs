@@ -203,11 +203,11 @@ fn snapshot(app: &MacBackend) -> Value {
             })
         })
         .collect();
-    let preparation = state.preparation.map(|item| {
-        let (status, apks, error) = match item.state {
-            PreparationState::Checking => ("checking", Vec::new(), None),
-            PreparationState::Ready(apks) => ("ready", apks, None),
-            PreparationState::Failed(error) => ("failed", Vec::new(), Some(error)),
+    let preparation = state.preparation.as_ref().map(|item| {
+        let (status, apks, error) = match &item.state {
+            PreparationState::Checking => ("checking", &[][..], None),
+            PreparationState::Ready(apks) => ("ready", apks.as_slice(), None),
+            PreparationState::Failed(error) => ("failed", &[][..], Some(error)),
         };
         let files: Vec<_> = item.paths.iter().enumerate().map(|(index, path)| {
             let apk = apks.get(index);
@@ -220,17 +220,21 @@ fn snapshot(app: &MacBackend) -> Value {
         }).collect();
         json!({"revision": item.revision, "split": item.split, "status": status, "files": files, "error": error})
     });
-    let discovered: Vec<_> = state.discovered.iter().map(|item| {
-        let kind = match item.service_type {
-            AdbServiceType::Pairing => "pairing",
-            AdbServiceType::TlsConnect => "tls",
-            AdbServiceType::Legacy => "tcp",
-        };
-        json!({
-            "id": item.fullname, "name": item.name, "kind": kind, "endpoint": item.endpoint,
-            "paired_id": item.paired_id().filter(|id| state.devices.iter().any(|device| device.id.strip_prefix("tls:") == Some(id))),
+    let discovered: Vec<_> = state
+        .discovered
+        .iter()
+        .map(|item| {
+            let kind = match item.service_type {
+                AdbServiceType::Pairing => "pairing",
+                AdbServiceType::TlsConnect => "tls",
+                AdbServiceType::Legacy => "tcp",
+            };
+            json!({
+                "id": item.fullname, "name": item.name, "kind": kind, "endpoint": item.endpoint,
+                "paired_id": state.paired_device_id(item),
+            })
         })
-    }).collect();
+        .collect();
     json!({
         "devices": devices, "jobs": jobs, "preparation": preparation, "discovered": discovered,
         "notice": state.notice, "connecting": state.connecting, "pairing": state.pairing,

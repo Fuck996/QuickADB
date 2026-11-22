@@ -6,7 +6,7 @@ mod support;
 use droidmux::pairing::{CredentialStore, StoredPairedDevice};
 use quickadb::{
     engine::Backend,
-    model::{DeviceStatus, Endpoint, JobStage, PreparationState},
+    model::{DeviceInfo, DeviceStatus, Endpoint, JobStage, PreparationState},
     storage::Storage,
 };
 use std::time::{Duration, Instant};
@@ -29,8 +29,14 @@ fn wait_for_timeout(
         }
         assert!(
             Instant::now() < deadline,
-            "state deadline exceeded: {}",
-            snapshot.notice
+            "state deadline exceeded: {}; devices: {:?}; discovery: {:?}",
+            snapshot.notice,
+            snapshot.devices,
+            snapshot
+                .discovered
+                .iter()
+                .map(|d| d.paired_id())
+                .collect::<Vec<_>>()
         );
         std::thread::sleep(Duration::from_millis(15));
     }
@@ -47,6 +53,14 @@ fn prepared_revision(backend: &Backend) -> u64 {
         .preparation
         .expect("prepared selection")
         .revision
+}
+
+fn paired_device_count(snapshot: &quickadb::model::Snapshot) -> usize {
+    snapshot
+        .devices
+        .iter()
+        .filter(|device| device.id.starts_with("tls:"))
+        .count()
 }
 
 #[test]
@@ -119,9 +133,146 @@ fn paired_device_retries_without_a_new_mdns_event_and_reconnects_after_idle_loss
         s.devices[0].status == DeviceStatus::Online
     });
     assert!(backend.snapshot().notice.is_empty());
-    assert_eq!(backend.snapshot().devices.len(), 1);
+    assert_eq!(paired_device_count(&backend.snapshot()), 1);
     assert!(!second.records.lock().expect("records").services.is_empty());
     drop(backend);
+    mdns.shutdown().expect("shutdown advertiser");
+}
+
+#[test]
+fn paired_device_recovers_when_its_broadcast_name_and_port_change() {
+    let directory = TempDirectory::new();
+    let listener = std::net::TcpListener::bind("0.0.0.0:0").expect("reserve old port");
+    let old_port = listener.local_addr().expect("port").port();
+    let serial: &'static str = Box::leak(format!("QUICKADB-ROTATED-{old_port}").into_boxed_str());
+    let guid = format!("adb-{serial}-{old_port}");
+    let key = format!("tls:{guid}");
+    let storage = Storage::open(directory.0.join("data")).expect("storage");
+    tokio::runtime::Runtime::new()
+        .expect("setup runtime")
+        .block_on(storage.save_paired_device(&StoredPairedDevice {
+            device_id: guid.clone(),
+            host: "127.0.0.1".into(),
+            certificate_fingerprint: "fixture-only".into(),
+        }))
+        .expect("pairing");
+    storage
+        .update_settings(|settings| {
+            settings.endpoints.push(Endpoint {
+                host: "127.0.0.1".into(),
+                port: old_port,
+                paired_id: Some(guid.clone()),
+            });
+            settings.device_info.insert(
+                key.clone(),
+                DeviceInfo {
+                    serial: serial.into(),
+                    model: "RP DUO".into(),
+                    android: "14".into(),
+                },
+            );
+            settings.aliases.insert(key.clone(), "掌机".into());
+        })
+        .expect("save original device");
+
+    let mdns = mdns_sd::ServiceDaemon::new().expect("advertiser");
+    let publish = |name: &str, port| {
+        mdns.register(
+            mdns_sd::ServiceInfo::new(
+                droidmux::discovery::ADB_TLS_CONNECT_SERVICE,
+                name,
+                &format!("quickadb-fixture-{port}.local."),
+                "",
+                port,
+                [("name", "测试连接")].as_slice(),
+            )
+            .expect("service")
+            .enable_addr_auto(),
+        )
+        .expect("register");
+    };
+    let wrong = DeviceServer::start(DeviceOptions {
+        tls: true,
+        serial: "DIFFERENT-DEVICE",
+        ..Default::default()
+    });
+    let options = DeviceOptions {
+        tls: true,
+        serial,
+        ..Default::default()
+    };
+    drop(listener);
+    publish(&guid, old_port);
+    publish(&format!("adb-{serial}-a{old_port}"), wrong.port);
+    let backend = Backend::new(storage.clone()).expect("backend");
+    wait_for_timeout(&backend, Duration::from_secs(15), |s| {
+        s.devices[0].status == DeviceStatus::Offline
+            && s.devices[0].detail.contains("序列号与原记录不同")
+    });
+    assert_eq!(storage.settings().endpoints[0].port, old_port);
+    assert_eq!(storage.settings().device_info[&key].serial, serial);
+
+    let current = DeviceServer::start(options.clone());
+    publish(&format!("{guid} (2)"), current.port);
+    let connected = |s: &quickadb::model::Snapshot, port| {
+        s.devices[0].status == DeviceStatus::Online
+            && s.devices[0]
+                .endpoint
+                .as_ref()
+                .is_some_and(|endpoint| endpoint.port == port)
+    };
+    wait_for(&backend, |s| connected(s, current.port));
+    let snapshot = backend.snapshot();
+    assert!(
+        snapshot
+            .discovered
+            .iter()
+            .any(|service| service.paired_id() == Some(&guid))
+    );
+    assert_eq!(paired_device_count(&snapshot), 1);
+    assert_eq!(snapshot.devices[0].name, "掌机");
+    assert_eq!(snapshot.devices[0].id, key);
+    assert_eq!(storage.settings().endpoints[0].port, current.port);
+    assert_eq!(storage.paired_devices()[0].device_id, guid);
+
+    backend.disconnect(key.clone());
+    wait_for(&backend, |s| {
+        s.devices[0].status == DeviceStatus::Disconnected
+    });
+    drop(current);
+    let manual = DeviceServer::start(options.clone());
+    publish(&format!("adb-{serial}-next"), manual.port);
+    wait_for(&backend, |s| {
+        s.discovered.iter().any(|d| d.endpoint.port == manual.port)
+    });
+    backend.retry_connection(key.clone());
+    wait_for(&backend, |s| connected(s, manual.port));
+
+    backend.disconnect(key.clone());
+    wait_for(&backend, |s| {
+        s.devices[0].status == DeviceStatus::Disconnected
+    });
+    drop(manual);
+    let install = DeviceServer::start(options);
+    publish(&format!("adb-{serial}-install"), install.port);
+    backend.toggle(&key);
+    let apk = support::write_apk(&directory, "恢复连接.apk", "test.rotated", "", 1);
+    let expected = std::fs::read(&apk).expect("APK");
+    backend.submit(vec![apk], false, false);
+    wait_for(&backend, |s| s.jobs.len() == 1 && !s.jobs[0].stage.active());
+    assert_eq!(backend.snapshot().jobs[0].stage, JobStage::Succeeded);
+    assert!(
+        wrong
+            .records
+            .lock()
+            .expect("wrong device")
+            .uploads
+            .is_empty()
+    );
+    assert_eq!(
+        install.records.lock().expect("right device").uploads,
+        vec![expected]
+    );
     mdns.shutdown().expect("shutdown advertiser");
 }
 
@@ -190,7 +341,7 @@ fn paired_devices_use_discovered_ports_and_keep_one_identity() {
     });
     std::thread::sleep(Duration::from_secs(12));
     let snapshot = backend.snapshot();
-    assert_eq!(snapshot.devices.len(), 1);
+    assert_eq!(paired_device_count(&snapshot), 1);
     assert_eq!(
         snapshot.devices[0].status,
         DeviceStatus::Online,
@@ -246,7 +397,7 @@ fn paired_devices_use_discovered_ports_and_keep_one_identity() {
     backend.retry_connection(id.clone());
     wait_for(&backend, |s| s.jobs.len() == 2 && !s.jobs[1].stage.active());
     let snapshot = backend.snapshot();
-    assert_eq!(snapshot.devices.len(), 1);
+    assert_eq!(paired_device_count(&snapshot), 1);
     assert_eq!(snapshot.devices[0].id, id);
     assert_eq!(
         snapshot.devices[0]
@@ -287,7 +438,7 @@ fn paired_devices_use_discovered_ports_and_keep_one_identity() {
     let restored =
         Backend::new(Storage::open(data).expect("reopen data")).expect("restarted backend");
     let snapshot = restored.snapshot();
-    assert_eq!(snapshot.devices.len(), 1);
+    assert_eq!(paired_device_count(&snapshot), 1);
     assert_eq!(snapshot.devices[0].id, id);
     assert_eq!(snapshot.devices[0].name, "常用测试机");
     assert_eq!(snapshot.devices[0].serial, "QUICKADB-TEST");
@@ -308,7 +459,7 @@ fn paired_devices_use_discovered_ports_and_keep_one_identity() {
         "{}",
         snapshot.jobs[0].detail
     );
-    assert_eq!(snapshot.devices.len(), 1);
+    assert_eq!(paired_device_count(&snapshot), 1);
     assert_eq!(snapshot.devices[0].name, "常用测试机");
     assert_eq!(
         snapshot.devices[0]
@@ -935,7 +1086,7 @@ fn offline_install_waits_for_its_guid_and_recovers_after_cancel_and_timeout() {
         s.jobs[2].stage == JobStage::Succeeded
     });
     let snapshot = backend.snapshot();
-    assert_eq!(snapshot.devices.len(), 1);
+    assert_eq!(paired_device_count(&snapshot), 1);
     assert!(!snapshot.devices[0].selected);
     assert_eq!(snapshot.jobs[2].device_id, id);
     assert_eq!(

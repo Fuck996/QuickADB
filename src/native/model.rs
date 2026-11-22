@@ -182,6 +182,26 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    pub fn paired_device_id(&self, service: &DiscoveredDevice) -> Option<&str> {
+        let guid = service.paired_id()?;
+        let paired = self
+            .devices
+            .iter()
+            .filter_map(|d| Some((d.id.strip_prefix("tls:")?, d.serial.as_str())));
+        if let Some((id, _)) = paired.clone().find(|(id, _)| id.eq_ignore_ascii_case(guid)) {
+            return Some(id);
+        }
+        // Android includes the device serial and a generated suffix in the service name.
+        // The connection must still verify the serial read over ADB.
+        let (serial, suffix) = guid.strip_prefix("adb-")?.rsplit_once('-')?;
+        if serial.is_empty() || suffix.is_empty() {
+            return None;
+        }
+        let mut matches = paired.filter(|(_, known)| known.eq_ignore_ascii_case(serial));
+        let (id, _) = matches.next()?;
+        matches.next().is_none().then_some(id)
+    }
+
     pub(crate) fn set_notice(&mut self, message: String) {
         self.notice = message;
         self.notice_deadline = Some(Instant::now() + Duration::from_secs(8));

@@ -57,7 +57,10 @@ struct QueueItem {
 }
 
 enum WirelessTarget {
-    Paired(String),
+    Paired {
+        device_id: String,
+        wait_for_discovery: bool,
+    },
     Address(Endpoint),
 }
 
@@ -72,7 +75,7 @@ enum DeviceChange {
 struct DeviceChangeCanceled;
 
 struct AutoReconnect {
-    endpoint: Endpoint,
+    endpoints: Vec<Endpoint>,
     revision: u64,
     failures: u32,
     next_attempt: Instant,
@@ -820,7 +823,7 @@ impl Engine {
             )
             .await
             .context("等待 USB 授权超时，请在手机上确认调试授权后重试")??;
-            Ok::<_, anyhow::Error>(client)
+            self.identify_client(&id, client, &cancel).await
         }
         .await;
         let _ = self.finish_connect(id, result, &cancel).await;
@@ -841,7 +844,14 @@ impl Engine {
         async move {
             if let Err(error) = self
                 .clone()
-                .connect_wireless(WirelessTarget::Paired(device_id), &self.stop, revision)
+                .connect_wireless(
+                    WirelessTarget::Paired {
+                        device_id,
+                        wait_for_discovery: true,
+                    },
+                    &self.stop,
+                    revision,
+                )
                 .await
                 && !error.is::<DeviceChangeCanceled>()
             {
@@ -880,42 +890,9 @@ impl Engine {
         cancel: &CancellationToken,
         revision: u64,
     ) -> Result<Arc<AdbClient>> {
-        let target_id = match &target {
+        let id = match &target {
             WirelessTarget::Address(endpoint) => endpoint.key(),
-            WirelessTarget::Paired(id) => format!("tls:{id}"),
-        };
-        {
-            let state = self.state.lock().expect("state lock poisoned");
-            if state.managing.contains(&target_id)
-                || state
-                    .device_revisions
-                    .get(&target_id)
-                    .copied()
-                    .unwrap_or_default()
-                    != revision
-            {
-                return Err(DeviceChangeCanceled.into());
-            }
-        }
-        let (id, endpoint) = match &target {
-            WirelessTarget::Paired(device_id) => {
-                ensure!(
-                    self.storage
-                        .paired_devices()
-                        .iter()
-                        .any(|d| d.device_id == *device_id),
-                    "此无线设备尚未与 QuickADB 配对"
-                );
-                let id = format!("tls:{device_id}");
-                let endpoint = self
-                    .storage
-                    .settings()
-                    .endpoints
-                    .into_iter()
-                    .find(|e| e.key() == id);
-                (id, endpoint)
-            }
-            WirelessTarget::Address(endpoint) => (endpoint.key(), Some(endpoint.clone())),
+            WirelessTarget::Paired { device_id, .. } => format!("tls:{device_id}"),
         };
         let gate = self.connection_gate(&id).await;
         let _connection = tokio::select! {
@@ -931,7 +908,7 @@ impl Engine {
                 return Err(DeviceChangeCanceled.into());
             }
         }
-        if let WirelessTarget::Paired(device_id) = &target {
+        if let WirelessTarget::Paired { device_id, .. } = &target {
             ensure!(
                 self.storage
                     .paired_devices()
@@ -949,31 +926,53 @@ impl Engine {
                 clients.remove(&id);
             }
         }
+        let endpoint = match &target {
+            WirelessTarget::Paired { .. } => self
+                .storage
+                .settings()
+                .endpoints
+                .into_iter()
+                .find(|e| e.key() == id),
+            WirelessTarget::Address(endpoint) => Some(endpoint.clone()),
+        };
         let attempt_cancel = self
             .start_connect(&id, &id, endpoint, cancel)
             .ok_or(DeviceChangeCanceled)?;
         let attempt = async {
             match target {
-                WirelessTarget::Address(endpoint) => self.dial_endpoint(&id, endpoint).await,
-                WirelessTarget::Paired(device_id) => {
+                WirelessTarget::Address(endpoint) => {
+                    self.dial_endpoint(&id, &endpoint, &attempt_cancel).await
+                }
+                WirelessTarget::Paired {
+                    device_id,
+                    wait_for_discovery,
+                } => {
                     self.update_device(&id, |d| d.detail = "正在查找当前无线连接端口…".into());
                     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
                     let mut last_error = None;
                     loop {
-                        let endpoint = self
-                            .state
-                            .lock()
-                            .expect("state lock poisoned")
-                            .discovered
-                            .iter()
-                            .find(|d| d.paired_id() == Some(device_id.as_str()))
-                            .map(|d| Endpoint {
-                                paired_id: Some(device_id.clone()),
-                                ..d.endpoint.clone()
+                        let endpoints = Self::discovered_endpoints(
+                            &self.state.lock().expect("state lock poisoned"),
+                            &device_id,
+                        );
+                        let per_endpoint =
+                            Duration::from_secs(if endpoints.len() > 1 { 8 } else { 30 });
+                        for endpoint in endpoints {
+                            self.update_device(&id, |d| {
+                                d.endpoint = Some(endpoint.clone());
+                                d.status = DeviceStatus::Connecting;
                             });
-                        if let Some(endpoint) = endpoint {
-                            self.update_device(&id, |d| d.endpoint = Some(endpoint.clone()));
-                            match self.dial_endpoint(&id, endpoint).await {
+                            let result = tokio::time::timeout(
+                                per_endpoint,
+                                self.dial_endpoint(&id, &endpoint, &attempt_cancel),
+                            )
+                            .await
+                            .context("等待设备响应超时")
+                            .and_then(|result| result)
+                            .with_context(|| {
+                                format!("无线地址 {}:{} 不可用", endpoint.host, endpoint.port)
+                            });
+                            match result {
                                 Ok(client) => return Ok(client),
                                 Err(error) => {
                                     self.update_device(&id, |d| {
@@ -983,15 +982,15 @@ impl Engine {
                                 }
                             }
                         }
-                        if tokio::time::Instant::now() >= deadline {
+                        if !wait_for_discovery || tokio::time::Instant::now() >= deadline {
                             return Err(match last_error {
                                 Some(error) => error.context("无线重连失败"),
                                 None => anyhow::anyhow!(
-                                    "尚未发现此设备的无线连接服务。请开启手机无线调试并确认与电脑在同一局域网；配对记录仍保留。"
+                                    "尚未发现此设备的无线连接服务。请确认设备已开启无线调试并与电脑在同一局域网，或在设备详情中填写无线调试主页上的地址和端口。"
                                 ),
                             });
                         }
-                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                 }
             }
@@ -1011,7 +1010,12 @@ impl Engine {
         result
     }
 
-    async fn dial_endpoint(self: &Arc<Self>, id: &str, endpoint: Endpoint) -> Result<AdbClient> {
+    async fn dial_endpoint(
+        self: &Arc<Self>,
+        id: &str,
+        endpoint: &Endpoint,
+        cancel: &CancellationToken,
+    ) -> Result<(AdbClient, DeviceInfo)> {
         ensure!(
             !endpoint.host.trim().is_empty() && endpoint.port > 0,
             "设备地址或端口无效"
@@ -1063,31 +1067,52 @@ impl Engine {
         )
         .await
         .context("等待无线设备授权超时")??;
-        Ok(client)
+        self.identify_client(id, client, cancel).await
+    }
+
+    async fn identify_client(
+        &self,
+        id: &str,
+        client: AdbClient,
+        cancel: &CancellationToken,
+    ) -> Result<(AdbClient, DeviceInfo)> {
+        let info = tokio::select! {
+            _ = cancel.cancelled() => Err(anyhow::anyhow!("连接已取消")),
+            result = shell_text(&client, "getprop ro.product.model && getprop ro.serialno && getprop ro.build.version.release") => result,
+        };
+        let info = info.and_then(|output| {
+            let info = parse_device_info(&output)?;
+            if let Some(saved) = self.storage.settings().device_info.get(id) {
+                ensure!(
+                    saved.serial.is_empty() || saved.serial == info.serial,
+                    "连接到的设备序列号与原记录不同，已停止连接与安装"
+                );
+            }
+            Ok(info)
+        });
+        match info {
+            Ok(info) => Ok((client, info)),
+            Err(error) => {
+                if let Err(error) = client.close().await {
+                    self.notice(&format!("读取设备信息失败后关闭连接失败：{error}"));
+                }
+                Err(error.context("读取设备信息失败"))
+            }
+        }
     }
 
     async fn finish_connect(
         self: &Arc<Self>,
         id: String,
-        result: Result<AdbClient>,
+        result: Result<(AdbClient, DeviceInfo)>,
         cancel: &CancellationToken,
     ) -> Result<Arc<AdbClient>> {
         let result = match result {
-            Ok(client) => {
-                let info = tokio::select! {
-                    _ = cancel.cancelled() => Err(anyhow::anyhow!("连接已取消")),
-                    result = shell_text(&client, "getprop ro.product.model && getprop ro.serialno && getprop ro.build.version.release") => result.context("读取设备信息失败"),
-                };
-                let info = info.and_then(|output| {
-                    let mut info = parse_device_info(&output)?;
+            Ok((client, mut info)) => {
+                let info = (|| {
+                    ensure!(!cancel.is_cancelled(), "连接已取消");
                     let settings = self.storage.settings();
                     let saved = settings.device_info.get(&id);
-                    if let Some(expected) = saved.map(|d| &d.serial).filter(|s| !s.is_empty()) {
-                        ensure!(
-                            &info.serial == expected,
-                            "连接到的设备序列号与原记录不同，已停止连接与安装"
-                        );
-                    }
                     let mut missing = Vec::new();
                     if info.model.is_empty() {
                         missing.push("型号");
@@ -1129,7 +1154,7 @@ impl Engine {
                         })?;
                     }
                     Ok((info, detail))
-                });
+                })();
                 match info {
                     Ok((info, detail)) => {
                         let alias = self
@@ -1266,6 +1291,32 @@ impl Engine {
         }
     }
 
+    fn discovered_endpoints(state: &Snapshot, device_id: &str) -> Vec<Endpoint> {
+        let mut services: Vec<_> = state
+            .discovered
+            .iter()
+            .filter(|service| state.paired_device_id(service) == Some(device_id))
+            .collect();
+        services.sort_unstable_by_key(|service| {
+            (
+                !service.instance_name.eq_ignore_ascii_case(device_id),
+                &service.fullname,
+            )
+        });
+        services
+            .into_iter()
+            .map(|service| Endpoint {
+                paired_id: Some(device_id.to_owned()),
+                ..service.endpoint.clone()
+            })
+            .fold(Vec::new(), |mut endpoints, endpoint| {
+                if !endpoints.contains(&endpoint) {
+                    endpoints.push(endpoint);
+                }
+                endpoints
+            })
+    }
+
     fn reconnect_discovered(self: &Arc<Self>) {
         let paired: BTreeSet<_> = self
             .storage
@@ -1276,28 +1327,24 @@ impl Engine {
         let candidates: Vec<_> = {
             let state = self.state.lock().expect("state lock poisoned");
             state
-                .discovered
+                .devices
                 .iter()
-                .filter_map(|discovered| {
-                    let guid = discovered.paired_id()?;
-                    if !paired.contains(guid) {
+                .filter_map(|device| {
+                    let guid = device.id.strip_prefix("tls:")?;
+                    if !paired.contains(guid) || device.status == DeviceStatus::Online {
                         return None;
                     }
-                    let id = format!("tls:{guid}");
-                    let device = state.devices.iter().find(|d| d.id == id);
-                    if device.is_some_and(|d| d.status == DeviceStatus::Online) {
+                    let endpoints = Self::discovered_endpoints(&state, guid);
+                    if endpoints.is_empty() {
                         return None;
                     }
-                    let eligible = !state.managing.contains(&id)
-                        && device.is_none_or(|d| d.status == DeviceStatus::Offline);
-                    let revision = state.device_revisions.get(&id).copied().unwrap_or_default();
+                    let eligible = !state.managing.contains(&device.id)
+                        && device.status == DeviceStatus::Offline;
                     Some((
-                        id,
-                        Endpoint {
-                            paired_id: Some(guid.to_owned()),
-                            ..discovered.endpoint.clone()
-                        },
-                        revision,
+                        device.id.clone(),
+                        guid.to_owned(),
+                        endpoints,
+                        device.revision,
                         eligible,
                     ))
                 })
@@ -1307,22 +1354,22 @@ impl Engine {
         retries.retain(|id, _| {
             candidates
                 .iter()
-                .any(|(candidate, _, _, _)| candidate == id)
+                .any(|(candidate, _, _, _, _)| candidate == id)
         });
-        for (id, endpoint, revision, eligible) in candidates {
+        for (id, guid, endpoints, revision, eligible) in candidates {
             if !eligible {
                 continue;
             }
             let retry = retries.entry(id.clone()).or_insert_with(|| AutoReconnect {
-                endpoint: endpoint.clone(),
+                endpoints: endpoints.clone(),
                 revision,
                 failures: 0,
                 next_attempt: Instant::now(),
                 running: false,
             });
-            if retry.endpoint != endpoint || retry.revision != revision {
+            if retry.endpoints != endpoints || retry.revision != revision {
                 *retry = AutoReconnect {
-                    endpoint: endpoint.clone(),
+                    endpoints: endpoints.clone(),
                     revision,
                     failures: 0,
                     next_attempt: Instant::now(),
@@ -1338,7 +1385,10 @@ impl Engine {
                 let result = engine
                     .clone()
                     .connect_wireless(
-                        WirelessTarget::Address(endpoint.clone()),
+                        WirelessTarget::Paired {
+                            device_id: guid,
+                            wait_for_discovery: false,
+                        },
                         &engine.stop,
                         revision,
                     )
@@ -1350,7 +1400,7 @@ impl Engine {
                         .expect("reconnect lock poisoned");
                     let Some(retry) = retries
                         .get_mut(&id)
-                        .filter(|r| r.endpoint == endpoint && r.revision == revision)
+                        .filter(|r| r.endpoints == endpoints && r.revision == revision)
                     else {
                         return;
                     };
@@ -1373,9 +1423,7 @@ impl Engine {
                                 Duration::from_secs((1_u64 << retry.failures.min(5)).min(30));
                             retry.next_attempt = Instant::now() + delay;
                             Some(format!(
-                                "设备 {id} 自动连接 {}:{} 第 {} 次失败，{} 秒后重试：{error:#}",
-                                endpoint.host,
-                                endpoint.port,
+                                "设备 {id} 自动连接第 {} 次失败，{} 秒后重试：{error:#}",
                                 retry.failures,
                                 delay.as_secs()
                             ))
@@ -1708,7 +1756,10 @@ impl Engine {
         } else if let Some(device_id) = target.id.strip_prefix("tls:") {
             self.clone()
                 .connect_wireless(
-                    WirelessTarget::Paired(device_id.to_owned()),
+                    WirelessTarget::Paired {
+                        device_id: device_id.to_owned(),
+                        wait_for_discovery: true,
+                    },
                     cancel,
                     target.revision,
                 )
